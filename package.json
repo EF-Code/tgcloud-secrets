@@ -1,0 +1,21 @@
+{
+  "name": "tgcloud-secrets",
+  "version": "0.1.0",
+  "description": "Capability-scoped secret injection for Telegram Serverless bots",
+  "type": "module",
+  "bin": {
+    "tgcloud-secrets": "src/cli.js"
+  },
+  "exports": {
+    "./runtime": "./runtime/secret-fetch.js"
+  },
+  "engines": {
+    "node": ">=18.18"
+  },
+  "scripts": {
+    "test": "node --test",
+    "start": "node src/cli.js serve",
+    "check": "node --check src/cli.js && node --check src/broker.js && node --check src/store.js && node --check src/policy.js && node --check runtime/secret-fetch.js"
+  },
+  "license": "MIT"
+}

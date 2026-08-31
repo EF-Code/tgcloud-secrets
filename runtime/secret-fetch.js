@@ -1,0 +1,58 @@
+/**
+ * Tiny dependency-free helper for a Telegram Serverless module.
+ *
+ * The capability is intentionally the only credential embedded in the bot
+ * module. It is revocable and scoped by the broker to one upstream origin,
+ * path prefix, and set of methods; it is not the vendor secret itself.
+ */
+export function createSecretFetch({ endpoint, capability, fetchImpl = globalThis.fetch } = {}) {
+  if (typeof endpoint !== 'string' || endpoint.length === 0) throw new Error('A broker endpoint is required');
+  if (typeof capability !== 'string' || capability.length === 0) throw new Error('A capability is required');
+  if (typeof fetchImpl !== 'function') throw new Error('A fetch implementation is required');
+
+  const brokerUrl = new URL(endpoint);
+  if (brokerUrl.protocol !== 'https:' && brokerUrl.protocol !== 'http:') throw new Error('Broker endpoint must use HTTP or HTTPS');
+  if (brokerUrl.username || brokerUrl.password) throw new Error('Broker endpoint must not contain credentials');
+
+  return async function secretFetch(path, init = {}) {
+    if (typeof path !== 'string' || !path.startsWith('/') || path.startsWith('//')) {
+      throw new Error('Secret fetch path must be an absolute path');
+    }
+    if (!init || typeof init !== 'object' || Array.isArray(init)) throw new Error('Fetch options must be an object');
+
+    const method = String(init.method || 'GET').toUpperCase();
+    const headers = {};
+    if (init.headers) {
+      const source = typeof Headers !== 'undefined' && init.headers instanceof Headers
+        ? Object.fromEntries(init.headers.entries())
+        : init.headers;
+      for (const [name, value] of Object.entries(source)) headers[name] = String(value);
+    }
+
+    let body = init.body;
+    if (body !== undefined && body !== null && typeof body !== 'string') {
+      if (typeof body === 'object' && !(body instanceof Uint8Array)) {
+        body = JSON.stringify(body);
+        if (!Object.keys(headers).some((name) => name.toLowerCase() === 'content-type')) headers['content-type'] = 'application/json';
+      } else if (body instanceof Uint8Array) {
+        throw new Error('Binary request bodies are not supported by this MVP; encode them at the integration boundary');
+      } else {
+        throw new Error('Request body must be a string, JSON object, or Uint8Array');
+      }
+    }
+
+    const brokerResponse = await fetchImpl(new URL('/v1/fetch', brokerUrl), {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-tgcloud-capability': capability,
+      },
+      body: JSON.stringify({ path, method, headers, body: body ?? undefined }),
+    });
+    return brokerResponse;
+  };
+}
+
+export function secretFetch(config, path, init) {
+  return createSecretFetch(config)(path, init);
+}
