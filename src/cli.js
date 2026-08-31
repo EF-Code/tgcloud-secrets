@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 
-import { SecretStore } from './store.js';
+import { MAX_SECRET_BYTES, SecretStore } from './store.js';
 import { createBrokerServer } from './broker.js';
+import { isLoopbackHost } from './policy.js';
 
 const VERSION = '0.1.0';
 
@@ -32,6 +33,7 @@ Grant options:
 Serve options:
   --host <host>                             Bind host (default: 127.0.0.1)
   --port <port>                             Bind port (default: 8787)
+  --allow-public                            Acknowledge that a non-loopback bind needs external TLS/access controls
 
 Examples:
   printf %s "$OPENAI_API_KEY" | tgcloud-secrets set openai
@@ -54,21 +56,50 @@ function parseArgs(args) {
       options[withoutPrefix] = true;
       continue;
     }
-    if (withoutPrefix === 'allow-http' || withoutPrefix === 'json') {
+    if (withoutPrefix === 'allow-http' || withoutPrefix === 'allow-public' || withoutPrefix === 'json') {
+      if (Object.hasOwn(options, withoutPrefix)) throw new Error(`Option --${withoutPrefix} was provided more than once`);
       options[withoutPrefix] = true;
       continue;
     }
     const equals = withoutPrefix.indexOf('=');
     if (equals !== -1) {
-      options[withoutPrefix.slice(0, equals)] = withoutPrefix.slice(equals + 1);
+      const name = withoutPrefix.slice(0, equals);
+      if (Object.hasOwn(options, name)) throw new Error(`Option --${name} was provided more than once`);
+      options[name] = withoutPrefix.slice(equals + 1);
       continue;
     }
     const next = args[index + 1];
     if (!next || next.startsWith('--')) throw new Error(`Option --${withoutPrefix} requires a value`);
+    if (Object.hasOwn(options, withoutPrefix)) throw new Error(`Option --${withoutPrefix} was provided more than once`);
     options[withoutPrefix] = next;
     index += 1;
   }
   return { positional, options };
+}
+
+const ALLOWED_OPTIONS = {
+  init: new Set(['data-dir', 'json']),
+  set: new Set(['data-dir', 'json']),
+  list: new Set(['data-dir', 'json']),
+  grant: new Set(['data-dir', 'json', 'base-url', 'path-prefix', 'method', 'inject-header', 'inject-prefix', 'allow-http']),
+  capabilities: new Set(['data-dir', 'json']),
+  caps: new Set(['data-dir', 'json']),
+  revoke: new Set(['data-dir', 'json']),
+  serve: new Set(['data-dir', 'host', 'port', 'allow-public']),
+};
+
+function validateCommandArgs(command, positional, options) {
+  if (!ALLOWED_OPTIONS[command]) throw new Error(`Unknown command: ${command}`);
+  for (const name of Object.keys(options)) {
+    if (!ALLOWED_OPTIONS[command].has(name)) throw new Error(`Unknown option for ${command}: --${name}`);
+  }
+  for (const name of ['json', 'allow-http', 'allow-public']) {
+    if (options[name] !== undefined && options[name] !== true) throw new Error(`--${name} is a flag and does not take a value`);
+  }
+  if (options['data-dir'] !== undefined && options['data-dir'].length === 0) throw new Error('--data-dir must not be empty');
+
+  const expectedPositionals = { init: 0, set: 1, list: 0, grant: 1, capabilities: 0, caps: 0, revoke: 1, serve: 0 }[command];
+  if (positional.length !== expectedPositionals) throw new Error(`Unexpected positional arguments for ${command}`);
 }
 
 function valueOption(options, name, fallback) {
@@ -84,7 +115,12 @@ async function readSecretFromStdin() {
     throw new Error('Refusing to read a secret from an interactive terminal; pipe it on stdin (for example, printf %s "$KEY" | tgcloud-secrets set name)');
   }
   const chunks = [];
-  for await (const chunk of process.stdin) chunks.push(chunk);
+  let total = 0;
+  for await (const chunk of process.stdin) {
+    total += chunk.length;
+    if (total > MAX_SECRET_BYTES) throw new Error(`Secret value must be at most ${MAX_SECRET_BYTES} bytes`);
+    chunks.push(chunk);
+  }
   const value = Buffer.concat(chunks).toString('utf8');
   if (value.length === 0) throw new Error('Secret value from stdin is empty');
   return value;
@@ -107,6 +143,7 @@ async function run(argv) {
 
   const command = argv[0];
   const { positional, options } = parseArgs(argv.slice(1));
+  validateCommandArgs(command, positional, options);
   const store = new SecretStore({ dataDir: dataDirOption(options) });
 
   if (command === 'init') {
@@ -181,6 +218,7 @@ async function run(argv) {
     const host = valueOption(options, 'host', '127.0.0.1');
     const port = Number(valueOption(options, 'port', '8787'));
     if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Port must be an integer from 1 to 65535');
+    if (!isLoopbackHost(host) && options['allow-public'] !== true) throw new Error('Refusing a non-loopback bind without --allow-public; put TLS and access controls in front of a public broker');
     const broker = createBrokerServer({ store, host, port });
     const address = await broker.listen();
     console.log(`tgcloud-secrets broker listening on http://${address.address === '::' ? '[::]' : address.address}:${address.port}`);

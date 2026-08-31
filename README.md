@@ -83,6 +83,8 @@ tgcloud-secrets serve [--host HOST] [--port PORT] [--data-dir PATH]
 
 `grant` options are `--path-prefix`, `--method` (comma-separated), `--inject-header`, `--inject-prefix`, and `--allow-http`. HTTP is rejected by default; `--allow-http` is intended only for local development.
 
+`serve` binds to loopback by default. A non-loopback bind requires the explicit `--allow-public` acknowledgement; put TLS termination, authentication/access control, and network filtering in front of that deployment.
+
 ## HTTP API
 
 The companion broker exposes:
@@ -90,7 +92,7 @@ The companion broker exposes:
 - `GET /healthz` — non-sensitive health response.
 - `POST /v1/fetch` — accepts a JSON request with `path`, optional `method`, `headers`, and string `body`. The capability is supplied in `X-Tgcloud-Capability`.
 
-The broker rejects out-of-policy paths, methods, absolute URLs, redirects, hop-by-hop headers, caller attempts to override the injected header, oversized request/response bodies, and malformed requests. Upstream response bodies are returned as-is, so an upstream service that intentionally echoes its authorization header could still expose it to the caller; integrations should be chosen with that in mind.
+The broker rejects out-of-policy paths, methods, absolute URLs, redirects, hop-by-hop/forwarding headers, caller attempts to override the injected header, oversized request/response bodies, private or link-local literal/DNS targets, and malformed requests. It also applies instance-local per-capability and invalid-attempt rate limits. Upstream response bodies are returned as-is, so an upstream service that intentionally echoes its authorization header could still expose it to the caller; integrations should be chosen with that in mind.
 
 ## Security model and current limits
 
@@ -98,9 +100,12 @@ The broker rejects out-of-policy paths, methods, absolute URLs, redirects, hop-b
 - Store and key files are created with restrictive permissions; the broker refuses symlinked data files.
 - The broker keeps only a SHA-256 hash of each capability token.
 - Logs contain capability IDs, paths, methods, and statuses, never secret values or tokens.
+- The broker resolves public hostnames before egress and rejects private/link-local answers; this is defense-in-depth, not a complete defense against DNS changes between resolution and connection.
+- The broker has bounded request/response sizes, timeouts, malformed-connection handling, and instance-local rate limits.
 - Capabilities are currently bearer tokens. A compromised Serverless module can use its allowed upstream capability until it is revoked; it cannot read the vendor secret through the broker API unless the upstream service itself returns it.
+- The local master key is stored separately as a mode-0600 file, but it lives beside the encrypted store in this MVP. A host compromise that obtains both files can decrypt the secrets; use an OS keyring/KMS-backed key strategy before production use.
 - There is no multi-tenant identity provider, rotation scheduler, quota store, or hosted control plane yet.
-- Concurrent administrative writes are not a distributed transaction. Use one admin process at a time until a durable coordination layer is added.
+- Administrative store writes use a local lock file and atomic replacement. This protects concurrent CLI writers on one filesystem, not a distributed multi-host deployment.
 
 ## Development
 

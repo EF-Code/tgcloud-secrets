@@ -7,12 +7,12 @@
  */
 export function createSecretFetch({ endpoint, capability, fetchImpl = globalThis.fetch } = {}) {
   if (typeof endpoint !== 'string' || endpoint.length === 0) throw new Error('A broker endpoint is required');
-  if (typeof capability !== 'string' || capability.length === 0) throw new Error('A capability is required');
+  if (typeof capability !== 'string' || !/^tgscap_[A-Za-z0-9_-]{16,256}$/.test(capability)) throw new Error('A valid capability is required');
   if (typeof fetchImpl !== 'function') throw new Error('A fetch implementation is required');
 
   const brokerUrl = new URL(endpoint);
   if (brokerUrl.protocol !== 'https:' && brokerUrl.protocol !== 'http:') throw new Error('Broker endpoint must use HTTP or HTTPS');
-  if (brokerUrl.username || brokerUrl.password) throw new Error('Broker endpoint must not contain credentials');
+  if (brokerUrl.username || brokerUrl.password || brokerUrl.pathname !== '/' || brokerUrl.search || brokerUrl.hash) throw new Error('Broker endpoint must be an origin without credentials, path, query, or fragment');
 
   return async function secretFetch(path, init = {}) {
     if (typeof path !== 'string' || !path.startsWith('/') || path.startsWith('//')) {
@@ -26,6 +26,7 @@ export function createSecretFetch({ endpoint, capability, fetchImpl = globalThis
       const source = typeof Headers !== 'undefined' && init.headers instanceof Headers
         ? Object.fromEntries(init.headers.entries())
         : init.headers;
+      if (!source || typeof source !== 'object' || Array.isArray(source)) throw new Error('Headers must be an object or Headers instance');
       for (const [name, value] of Object.entries(source)) headers[name] = String(value);
     }
 
@@ -35,7 +36,7 @@ export function createSecretFetch({ endpoint, capability, fetchImpl = globalThis
         body = JSON.stringify(body);
         if (!Object.keys(headers).some((name) => name.toLowerCase() === 'content-type')) headers['content-type'] = 'application/json';
       } else if (body instanceof Uint8Array) {
-        throw new Error('Binary request bodies are not supported by this MVP; encode them at the integration boundary');
+        throw new Error('Binary request bodies are not supported by this MVP; encode them before calling secretFetch');
       } else {
         throw new Error('Request body must be a string, JSON object, or Uint8Array');
       }

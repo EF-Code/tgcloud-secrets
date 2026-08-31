@@ -1,8 +1,11 @@
+import { isIP } from 'node:net';
+
 const METHODS = new Set(['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']);
 
 const HOP_BY_HOP_HEADERS = new Set([
   'connection',
   'content-length',
+  'forwarded',
   'host',
   'keep-alive',
   'proxy-authenticate',
@@ -11,6 +14,11 @@ const HOP_BY_HOP_HEADERS = new Set([
   'trailer',
   'transfer-encoding',
   'upgrade',
+  'via',
+  'x-forwarded-for',
+  'x-forwarded-host',
+  'x-forwarded-port',
+  'x-forwarded-proto',
 ]);
 
 export function normalizeMethods(value = ['GET']) {
@@ -33,8 +41,14 @@ export function normalizeBaseUrl(value, { allowHttp = false } = {}) {
   if (url.username || url.password || url.search || url.hash) {
     throw new Error('Base URL must not contain credentials, query parameters, or a fragment');
   }
-  if (url.protocol !== 'https:' && !(allowHttp && url.protocol === 'http:')) {
+  if (url.protocol === 'http:' && !(allowHttp && isSafeHttpHost(url.hostname))) {
+    throw new Error('HTTP is allowed only for loopback development targets; production capabilities require HTTPS');
+  }
+  if (url.protocol !== 'https:' && url.protocol !== 'http:') {
     throw new Error('Base URL must use HTTPS (use --allow-http only for local development)');
+  }
+  if (isPrivateHost(url.hostname) && !(allowHttp && url.protocol === 'http:' && isSafeHttpHost(url.hostname))) {
+    throw new Error('Base URL must not target localhost or a private/link-local IP address');
   }
   if (url.pathname !== '/' && url.pathname !== '') {
     throw new Error('Base URL must contain only an origin; put the API path in --path-prefix');
@@ -112,6 +126,13 @@ export function normalizeInjectHeader(value = 'authorization') {
   return header;
 }
 
+export function normalizeInjectPrefix(value = '') {
+  if (typeof value !== 'string' || value.length > 128 || /[\r\n]/.test(value)) {
+    throw new Error('Injection prefix must be a string of at most 128 characters without CR or LF');
+  }
+  return value;
+}
+
 export function sanitizeForwardHeaders(input, injectedHeader) {
   const output = new Headers();
   const entries = input && typeof input === 'object' ? Object.entries(input) : [];
@@ -142,6 +163,50 @@ export function isSafeHttpHost(hostname) {
   return normalized === 'localhost'
     || normalized === '127.0.0.1'
     || normalized === '::1';
+}
+
+export function isLoopbackHost(hostname) {
+  const normalized = hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  if (normalized === 'localhost' || normalized === '::1') return true;
+  return isIP(normalized) === 4 && normalized.startsWith('127.');
+}
+
+function isPrivateIpv4(hostname) {
+  const octets = hostname.split('.').map(Number);
+  if (octets.length !== 4 || octets.some((octet) => !Number.isInteger(octet) || octet < 0 || octet > 255)) return false;
+  const [first, second] = octets;
+  return first === 0
+    || first === 10
+    || first === 127
+    || (first === 100 && second >= 64 && second <= 127)
+    || (first === 169 && second === 254)
+    || (first === 172 && second >= 16 && second <= 31)
+    || (first === 192 && second === 0)
+    || (first === 192 && second === 168)
+    || (first === 198 && (second === 18 || second === 19))
+    || first >= 224;
+}
+
+export function isPrivateHost(hostname) {
+  const normalized = hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  // URL parsers may canonicalize an IPv4-mapped address to hexadecimal form;
+  // reject the entire mapped range rather than risk missing a private target.
+  if (normalized.startsWith('::ffff:')) return true;
+  if (isSafeHttpHost(normalized)) return true;
+  if (isIP(normalized) === 4) return isPrivateIpv4(normalized);
+  if (isIP(normalized) === 6) {
+    return normalized === '::'
+      || normalized === '::1'
+      || normalized.startsWith('fc')
+      || normalized.startsWith('fd')
+      || normalized.startsWith('fe8')
+      || normalized.startsWith('fe9')
+      || normalized.startsWith('fea')
+      || normalized.startsWith('feb')
+      || normalized.startsWith('fec')
+      || normalized.startsWith('ff');
+  }
+  return false;
 }
 
 export { HOP_BY_HOP_HEADERS };

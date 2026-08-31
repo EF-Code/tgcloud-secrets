@@ -3,3 +3,4 @@ tests/
 .tgcloud-secrets/
 .env*
 *.log
+security_best_practices_report.md
