@@ -43,12 +43,18 @@ async function pathExists(path) {
 
 async function ensurePrivateDirectory(path) {
   if (await pathExists(path)) {
-    const info = await lstat(path);
-    if (!info.isDirectory() || info.isSymbolicLink()) {
+    const linfo = await lstat(path);
+    if (!linfo.isDirectory() || linfo.isSymbolicLink()) {
       throw new Error(`Refusing to use a non-directory data path: ${path}`);
     }
-    assertCurrentUserOwnership(info, path);
-    if ((info.mode & 0o077) !== 0) await chmod(path, 0o700);
+    const handle = await open(path, 'r');
+    try {
+      const info = await handle.stat();
+      assertCurrentUserOwnership(info, path);
+      if ((info.mode & 0o077) !== 0) await handle.chmod(0o700);
+    } finally {
+      await handle.close().catch(() => {});
+    }
   } else {
     await mkdir(path, { recursive: true, mode: 0o700 });
   }
@@ -87,12 +93,18 @@ async function createPrivateFile(path, contents) {
 }
 
 async function ensurePrivateFile(path) {
-  const info = await lstat(path);
-  if (!info.isFile() || info.isSymbolicLink()) {
+  const linfo = await lstat(path);
+  if (!linfo.isFile() || linfo.isSymbolicLink()) {
     throw new Error(`Refusing to use a non-regular secret file: ${path}`);
   }
-  assertCurrentUserOwnership(info, path);
-  if ((info.mode & 0o077) !== 0) await chmod(path, 0o600);
+  const handle = await open(path, 'r');
+  try {
+    const info = await handle.stat();
+    assertCurrentUserOwnership(info, path);
+    if ((info.mode & 0o077) !== 0) await handle.chmod(0o600);
+  } finally {
+    await handle.close().catch(() => {});
+  }
 }
 
 function assertCurrentUserOwnership(info, path) {
@@ -209,6 +221,9 @@ function validateSecretName(name) {
   if (typeof name !== 'string' || !SECRET_NAME.test(name)) {
     throw new Error('Secret name must start with a letter and contain only letters, numbers, ., _, or -');
   }
+  if (name === '__proto__' || name === 'constructor' || name === 'prototype') {
+    throw new Error('Secret name is reserved');
+  }
   return name;
 }
 
@@ -307,25 +322,39 @@ export class SecretStore {
     const lockPath = join(this.dataDir, '.lock');
     const startedAt = Date.now();
     while (true) {
-      // A stale-lock reaper temporarily moves the observed inode into a
-      // quarantine pathname. Treat that pathname as the lock still being
-      // held; otherwise a contender could enter during the move/restore
-      // window and violate mutual exclusion.
       const quarantines = await reapDeadLockQuarantines(this.dataDir);
-      if (quarantines.length > 0) {
+      // Only stale quarantines indicate a reclamation that is still in flight;
+      // fresh quarantines (e.g., an attacker-created file) must not block
+      // writers for the full stale window.
+      const staleQuarantines = [];
+      for (const qp of quarantines) {
+        try {
+          const info = await lstat(qp);
+          if (Date.now() - info.mtimeMs > STALE_LOCK_MS) staleQuarantines.push(qp);
+        } catch {
+          // Quarantine disappeared between list and stat — treat as gone.
+        }
+      }
+      if (staleQuarantines.length > 0) {
         if (Date.now() - startedAt >= LOCK_TIMEOUT_MS) throw new Error('Timed out waiting for the secret store lock');
         await wait(25);
         continue;
       }
+      if (quarantines.length > 100) throw new Error('Too many stale lock quarantines; data directory may be under attack or need cleanup');
       let handle;
       try {
         handle = await open(lockPath, 'wx', 0o600);
         await handle.writeFile(`${JSON.stringify({ pid: process.pid, createdAt: new Date().toISOString() })}\n`);
         const identity = await handle.stat();
-        // A reaper may have moved another inode after the open succeeded.
-        // Abandon this candidate if its quarantine marker is visible so no
-        // writer proceeds while reclamation is in flight.
-        if ((await listLockQuarantines(this.dataDir)).length > 0) {
+        const postQuarantines = await listLockQuarantines(this.dataDir);
+        const postStale = [];
+        for (const qp of postQuarantines) {
+          try {
+            const info = await lstat(qp);
+            if (Date.now() - info.mtimeMs > STALE_LOCK_MS) postStale.push(qp);
+          } catch {}
+        }
+        if (postStale.length > 0) {
           const candidate = { handle, lockPath, identity };
           handle = undefined;
           await this._releaseWriteLock(candidate);
