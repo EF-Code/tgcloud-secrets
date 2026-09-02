@@ -165,3 +165,14 @@ test('19 - store fchmod auto-fixes 0644 to 0600', async () => {
   assert.equal((await stat(keyPath)).mode & 0o777, 0o600);
 });
 
+
+test('20 - runtime strips fragment and validates header', async () => {
+  const { createSecretFetch } = await import('../runtime/secret-fetch.js');
+  const cap = 'tgscap_' + 'a'.repeat(32);
+  let seenPath;
+  const sf = createSecretFetch({ endpoint: 'https://secrets.example.com', capability: cap, fetchImpl: async (url, opts) => { seenPath = JSON.parse(opts.body).path; return new Response('ok'); } });
+  await sf('/v1/health#frag');
+  assert.equal(seenPath, '/v1/health');
+  await assert.rejects(() => sf('/v1/health', { headers: { 'x-test': 'bad\u0000' } }), /unsafe/);
+});
+
