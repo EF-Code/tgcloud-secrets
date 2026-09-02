@@ -125,3 +125,22 @@ test('16 - broker healthz HEAD with query', async () => {
   await broker.close();
 });
 
+
+test('17 - broker graceful drain awaits inFlight', async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'tg-swarm-'));
+  const store = new SecretStore({ dataDir });
+  await store.init();
+  await store.setSecret('demo', 'secret-value');
+  const cap = await store.createCapability({ secretName: 'demo', baseUrl: 'https://api.example.com', pathPrefix: '/', methods: ['GET'] });
+  const broker = createBrokerServer({ store, host: '127.0.0.1', port: 0, lookupImpl: async () => [{ address: '93.184.216.34', family: 4 }], fetchImpl: async () => { await new Promise((r) => setTimeout(r, 100)); return new Response('ok'); }, logger: { info() {}, error() {} } });
+  const addr = await broker.listen();
+  const ep = 'http://127.0.0.1:' + addr.port + '/v1/fetch';
+  const req = fetch(ep, { method: 'POST', headers: { 'x-tgcloud-capability': cap.token, 'content-type': 'application/json' }, body: JSON.stringify({ path: '/health' }) });
+  await new Promise((r) => setTimeout(r, 20));
+  const start = Date.now();
+  await broker.close();
+  assert.ok(Date.now() - start >= 50, 'close should wait for inFlight');
+  const res = await req;
+  assert.equal(res.status, 200);
+});
+
