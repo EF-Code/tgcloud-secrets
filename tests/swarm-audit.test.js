@@ -180,3 +180,8 @@ test('20 - runtime strips fragment and validates header', async () => {
 test('double-encoded query %250a should be blocked', () => {
   assert.throws(() => resolveUpstreamUrl('https://api.example.com/', '/v1/health?evil=%250a', '/v1/'), /forbidden/);
 });
+
+test('isLoopbackHost handles 127.000.0.1', () => {
+  const { isLoopbackHost } = await import('../src/policy.js');
+  assert.equal(isLoopbackHost('127.000.0.1'), true);
+});
