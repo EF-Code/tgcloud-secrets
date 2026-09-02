@@ -19,7 +19,7 @@ This is an early MVP, suitable for local development and a carefully controlled 
 
 ## Quick start
 
-Requires Node.js 18.18 or newer.
+Requires a supported Node.js LTS release (22 or newer) for the CLI and broker.
 
 ```sh
 npm test
@@ -43,6 +43,8 @@ node src/cli.js serve --data-dir .tgcloud-secrets --host 127.0.0.1 --port 8787
 ```
 
 `grant` prints a capability token once. The broker stores only its hash, so a lost token cannot be recovered; revoke it and create a new capability instead. The capability is not the vendor secret, but it is still a bearer credential and should not be committed to a public repository.
+
+If `--data-dir` is omitted, the CLI uses the platform's per-user data directory (or `TGCLOUD_SECRETS_DATA_DIR`). The quick-start examples use an explicit project-local directory only to make the files visible; add that directory to `.gitignore` and never commit `master.key` or `store.json`.
 
 ## Using it from a Telegram Serverless module
 
@@ -73,17 +75,17 @@ The helper uses the platform's fetch-compatible implementation and returns the b
 
 ```text
 tgcloud-secrets init [--data-dir PATH]
-tgcloud-secrets set NAME [--data-dir PATH]       # reads the exact value from stdin
+tgcloud-secrets set NAME [--data-dir PATH]       # reads the value from stdin (trailing LF/CRLF is a delimiter)
 tgcloud-secrets list [--json] [--data-dir PATH]
 tgcloud-secrets grant NAME --base-url URL [options]
 tgcloud-secrets capabilities [--json] [--data-dir PATH]
 tgcloud-secrets revoke CAPABILITY_ID [--data-dir PATH]
-tgcloud-secrets serve [--host HOST] [--port PORT] [--data-dir PATH]
+tgcloud-secrets serve [--host HOST] [--port PORT] [--data-dir PATH] [--trusted-proxy IP[,IP...]]
 ```
 
-`grant` options are `--path-prefix`, `--method` (comma-separated), `--inject-header`, `--inject-prefix`, and `--allow-http`. HTTP is rejected by default; `--allow-http` is intended only for local development.
+`grant` options are `--path-prefix`, `--method` (comma-separated), `--inject-header`, `--inject-prefix`, and `--allow-http`. HTTP is rejected by default for upstreams; `--allow-http` is intended only for local development. The runtime helper likewise requires HTTPS for remote broker endpoints and permits HTTP only for loopback development endpoints.
 
-`serve` binds to loopback by default. A non-loopback bind requires the explicit `--allow-public` acknowledgement; put TLS termination, authentication/access control, and network filtering in front of that deployment.
+`serve` binds to loopback by default. A non-loopback bind requires the explicit `--allow-public` acknowledgement; put TLS termination, authentication/access control, and network filtering in front of that deployment. If a trusted proxy overwrites `X-Forwarded-For`, pass its immediate IP with `--trusted-proxy` so invalid-attempt rate limits can distinguish clients; never use this option unless direct access is blocked and the proxy controls that header.
 
 ## HTTP API
 
@@ -96,12 +98,14 @@ The broker rejects out-of-policy paths, methods, absolute URLs, redirects, hop-b
 
 ## Security model and current limits
 
-- AES-256-GCM encrypts each stored secret with a local 32-byte master key.
+- AES-256-GCM encrypts each stored secret with a local 32-byte master key and binds the ciphertext to its logical secret name; records from older unbound MVP builds must be re-entered after upgrading.
 - Store and key files are created with restrictive permissions; the broker refuses symlinked data files.
 - The broker keeps only a SHA-256 hash of each capability token.
 - Logs contain capability IDs, paths, methods, and statuses, never secret values or tokens.
-- The broker resolves public hostnames before egress and rejects private/link-local answers; this is defense-in-depth, not a complete defense against DNS changes between resolution and connection.
-- The broker has bounded request/response sizes, timeouts, malformed-connection handling, and instance-local rate limits.
+- The broker resolves public hostnames before egress, rejects private/link-local answers, and the default fetch path pins the verified address while preserving the original Host/SNI name.
+- The broker has bounded request/response sizes, timeouts, malformed-connection handling, per-capability concurrency limits, and instance-local rate limits.
+- Invalid-attempt limiting uses the broker's immediate TCP peer by default. A public deployment behind a reverse proxy must enforce client-aware authentication and rate limiting at that trusted edge; `--trusted-proxy` enables `X-Forwarded-For` use only for explicitly listed immediate proxy IPs, and the proxy must overwrite that header.
+- Capability policy metadata is authenticated with the local master key; capabilities created by older MVP builds must be re-granted after upgrading.
 - Capabilities are currently bearer tokens. A compromised Serverless module can use its allowed upstream capability until it is revoked; it cannot read the vendor secret through the broker API unless the upstream service itself returns it.
 - The local master key is stored separately as a mode-0600 file, but it lives beside the encrypted store in this MVP. A host compromise that obtains both files can decrypt the secrets; use an OS keyring/KMS-backed key strategy before production use.
 - There is no multi-tenant identity provider, rotation scheduler, quota store, or hosted control plane yet.

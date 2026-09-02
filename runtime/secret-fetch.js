@@ -5,6 +5,15 @@
  * module. It is revocable and scoped by the broker to one upstream origin,
  * path prefix, and set of methods; it is not the vendor secret itself.
  */
+function isLoopbackHost(hostname) {
+  const normalized = String(hostname).toLowerCase().replace(/^\[|\]$/g, '').replace(/\.+$/, '');
+  if (normalized === 'localhost' || normalized === '::1') return true;
+  const octets = normalized.split('.').map(Number);
+  return octets.length === 4
+    && octets[0] === 127
+    && octets.every((octet) => Number.isInteger(octet) && octet >= 0 && octet <= 255);
+}
+
 export function createSecretFetch({ endpoint, capability, fetchImpl = globalThis.fetch } = {}) {
   if (typeof endpoint !== 'string' || endpoint.length === 0) throw new Error('A broker endpoint is required');
   if (typeof capability !== 'string' || !/^tgscap_[A-Za-z0-9_-]{16,256}$/.test(capability)) throw new Error('A valid capability is required');
@@ -13,6 +22,9 @@ export function createSecretFetch({ endpoint, capability, fetchImpl = globalThis
   const brokerUrl = new URL(endpoint);
   if (brokerUrl.protocol !== 'https:' && brokerUrl.protocol !== 'http:') throw new Error('Broker endpoint must use HTTP or HTTPS');
   if (brokerUrl.username || brokerUrl.password || brokerUrl.pathname !== '/' || brokerUrl.search || brokerUrl.hash) throw new Error('Broker endpoint must be an origin without credentials, path, query, or fragment');
+  if (brokerUrl.protocol === 'http:' && !isLoopbackHost(brokerUrl.hostname)) {
+    throw new Error('HTTP broker endpoints are allowed only for loopback development targets; use HTTPS for remote brokers');
+  }
 
   return async function secretFetch(path, init = {}) {
     if (typeof path !== 'string' || !path.startsWith('/') || path.startsWith('//')) {
@@ -20,7 +32,7 @@ export function createSecretFetch({ endpoint, capability, fetchImpl = globalThis
     }
     if (!init || typeof init !== 'object' || Array.isArray(init)) throw new Error('Fetch options must be an object');
 
-    const method = String(init.method || 'GET').toUpperCase();
+    const method = String(init.method === undefined ? 'GET' : init.method).toUpperCase();
     const headers = {};
     if (init.headers) {
       const source = typeof Headers !== 'undefined' && init.headers instanceof Headers
@@ -49,6 +61,9 @@ export function createSecretFetch({ endpoint, capability, fetchImpl = globalThis
         'x-tgcloud-capability': capability,
       },
       body: JSON.stringify({ path, method, headers, body: body ?? undefined }),
+      redirect: 'error',
+      credentials: 'omit',
+      signal: init.signal,
     });
     return brokerResponse;
   };

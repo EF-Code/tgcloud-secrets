@@ -9,8 +9,14 @@
   "exports": {
     "./runtime": "./runtime/secret-fetch.js"
   },
+  "files": [
+    "LICENSE",
+    "README.md",
+    "runtime/",
+    "src/"
+  ],
   "engines": {
-    "node": ">=18.18"
+    "node": ">=22.0.0"
   },
   "scripts": {
     "test": "node --test",

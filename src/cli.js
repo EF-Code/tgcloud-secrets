@@ -3,6 +3,7 @@
 import { MAX_SECRET_BYTES, SecretStore } from './store.js';
 import { createBrokerServer } from './broker.js';
 import { isLoopbackHost } from './policy.js';
+import { join } from 'node:path';
 
 const VERSION = '0.1.0';
 
@@ -21,7 +22,7 @@ Commands:
   serve                                     Run the local/companion broker
 
 Global options:
-  --data-dir <path>                         Store directory (default: .tgcloud-secrets)
+  --data-dir <path>                         Store directory (default: OS user-data directory)
 
 Grant options:
   --path-prefix <path>                      Allowed upstream path (default: /)
@@ -33,6 +34,7 @@ Grant options:
 Serve options:
   --host <host>                             Bind host (default: 127.0.0.1)
   --port <port>                             Bind port (default: 8787)
+  --trusted-proxy <ips>                     Trust X-Forwarded-For from these proxy IPs for rate limiting
   --allow-public                            Acknowledge that a non-loopback bind needs external TLS/access controls
 
 Examples:
@@ -85,7 +87,7 @@ const ALLOWED_OPTIONS = {
   capabilities: new Set(['data-dir', 'json']),
   caps: new Set(['data-dir', 'json']),
   revoke: new Set(['data-dir', 'json']),
-  serve: new Set(['data-dir', 'host', 'port', 'allow-public']),
+  serve: new Set(['data-dir', 'host', 'port', 'trusted-proxy', 'allow-public']),
 };
 
 function validateCommandArgs(command, positional, options) {
@@ -107,7 +109,19 @@ function valueOption(options, name, fallback) {
 }
 
 function dataDirOption(options) {
-  return valueOption(options, 'data-dir', process.env.TGCLOUD_SECRETS_DATA_DIR || '.tgcloud-secrets');
+  if (options['data-dir'] !== undefined) return options['data-dir'];
+  if (process.env.TGCLOUD_SECRETS_DATA_DIR) return process.env.TGCLOUD_SECRETS_DATA_DIR;
+  if (process.platform === 'win32') return join(process.env.APPDATA || process.env.LOCALAPPDATA || '.', 'tgcloud-secrets');
+  if (process.env.XDG_DATA_HOME) return join(process.env.XDG_DATA_HOME, 'tgcloud-secrets');
+  if (process.env.HOME) return join(process.env.HOME, '.local', 'share', 'tgcloud-secrets');
+  return '.tgcloud-secrets';
+}
+
+function trustedProxyOption(options) {
+  if (options['trusted-proxy'] === undefined) return [];
+  const addresses = options['trusted-proxy'].split(',').map((value) => value.trim()).filter(Boolean);
+  if (addresses.length === 0) throw new Error('--trusted-proxy must contain one or more IP addresses');
+  return addresses;
 }
 
 async function readSecretFromStdin() {
@@ -118,11 +132,12 @@ async function readSecretFromStdin() {
   let total = 0;
   for await (const chunk of process.stdin) {
     total += chunk.length;
-    if (total > MAX_SECRET_BYTES) throw new Error(`Secret value must be at most ${MAX_SECRET_BYTES} bytes`);
+    if (total > MAX_SECRET_BYTES + 2) throw new Error(`Secret value must be at most ${MAX_SECRET_BYTES} bytes`);
     chunks.push(chunk);
   }
-  const value = Buffer.concat(chunks).toString('utf8');
+  const value = Buffer.concat(chunks).toString('utf8').replace(/\r?\n$/, '');
   if (value.length === 0) throw new Error('Secret value from stdin is empty');
+  if (Buffer.byteLength(value, 'utf8') > MAX_SECRET_BYTES) throw new Error(`Secret value must be at most ${MAX_SECRET_BYTES} bytes`);
   return value;
 }
 
@@ -219,7 +234,7 @@ async function run(argv) {
     const port = Number(valueOption(options, 'port', '8787'));
     if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Port must be an integer from 1 to 65535');
     if (!isLoopbackHost(host) && options['allow-public'] !== true) throw new Error('Refusing a non-loopback bind without --allow-public; put TLS and access controls in front of a public broker');
-    const broker = createBrokerServer({ store, host, port });
+    const broker = createBrokerServer({ store, host, port, trustedProxyAddresses: trustedProxyOption(options) });
     const address = await broker.listen();
     console.log(`tgcloud-secrets broker listening on http://${address.address === '::' ? '[::]' : address.address}:${address.port}`);
     const shutdown = async () => {
