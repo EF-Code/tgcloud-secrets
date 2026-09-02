@@ -143,3 +143,7 @@ test('pg-store: list and isolate org/project', async () => {
     await store2.close().catch(() => {});
   }
 });
+
+test('pg-store: orgId with colon should be rejected', () => {
+  assert.throws(() => new PgStore({ dsn: 'postgres://postgres:postgres@localhost:5433/tgcloud', orgId: 'a:b', projectId: 'c', kmsProvider: new LocalKMSProvider({ masterKey: generateMasterKey(), keyId: 'local' }) }), /colon|must not contain/);
+});
