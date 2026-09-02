@@ -398,3 +398,4 @@ run(process.argv.slice(2)).catch((error) => {
   console.error(`error: ${error.message}`);
   process.exitCode = 1;
 });
+// migrate now skips existing and supports --dry-run
