@@ -128,3 +128,6 @@ The tests exercise encryption, restrictive storage, capability scoping, header h
 
 ### Swarm Audit Fix 3
 - Documented fix for finding #3 with file:line refs and verification steps.
+
+### Swarm Audit Fix 4
+- Documented fix for finding #4 with file:line refs and verification steps.
