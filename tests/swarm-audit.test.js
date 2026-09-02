@@ -42,3 +42,8 @@ test('6 - hash control characters rejected', () => {
   assert.throws(() => resolveUpstreamUrl('https://api.example.com/', '/v1/health#frag\u0000', '/v1/'), /forbidden character/);
 });
 
+
+test('7 - encoded null %00 in query blocked', () => {
+  assert.throws(() => resolveUpstreamUrl('https://api.example.com/', '/v1/health?evil=%00', '/v1/'), /forbidden encoded/);
+});
+
