@@ -176,3 +176,7 @@ test('20 - runtime strips fragment and validates header', async () => {
   await assert.rejects(() => sf('/v1/health', { headers: { 'x-test': 'bad\u0000' } }), /unsafe/);
 });
 
+
+test('double-encoded query %250a should be blocked', () => {
+  assert.throws(() => resolveUpstreamUrl('https://api.example.com/', '/v1/health?evil=%250a', '/v1/'), /forbidden/);
+});
