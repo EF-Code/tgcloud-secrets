@@ -32,3 +32,8 @@ test('4 - nested encoded slash %252f blocked', () => {
   assert.throws(() => resolveUpstreamUrl('https://api.example.com/', '/v1/%25252fadmin', '/v1/'), /forbidden encoded/);
 });
 
+
+test('5 - search control characters rejected', () => {
+  assert.throws(() => resolveUpstreamUrl('https://api.example.com/', '/v1/health?evil=\u0000', '/v1/'), /forbidden character/);
+});
+
