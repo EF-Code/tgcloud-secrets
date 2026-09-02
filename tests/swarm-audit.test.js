@@ -26,3 +26,9 @@ test('3 - trailing dot rejected in normalizeBaseUrl', () => {
   assert.throws(() => normalizeBaseUrl('https://api.example.com./'), /trailing dot/);
 });
 
+
+test('4 - nested encoded slash %252f blocked', () => {
+  assert.throws(() => resolveUpstreamUrl('https://api.example.com/', '/v1/%252fadmin', '/v1/'), /forbidden encoded/);
+  assert.throws(() => resolveUpstreamUrl('https://api.example.com/', '/v1/%25252fadmin', '/v1/'), /forbidden encoded/);
+});
+
