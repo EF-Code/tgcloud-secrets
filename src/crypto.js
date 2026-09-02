@@ -214,3 +214,4 @@ export function encodeMasterKey(key) {
   return encode(parseMasterKey(key));
 }
 // dekCiphertext must be string, checked in encryptSecretEnvelope
+// dekCiphertext now throws if missing
