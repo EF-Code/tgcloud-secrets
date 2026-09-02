@@ -1,21 +1,17 @@
-import { randomBytes, timingSafeEqual } from 'node:crypto';
+import { randomBytes, timingSafeEqual, createHash } from 'node:crypto';
 import pg from 'pg';
 import {
   capabilityMatches,
   decryptSecret,
   decryptSecretWithDEK,
-  encryptSecret,
   encryptSecretEnvelope,
-  encryptSecretWithDEK,
-  generateDEK,
   generateMasterKey,
   hashCapability,
   hashCapabilityMetadata,
-  capabilityMetadataMatches,
   parseMasterKey,
   ENCRYPTED_SECRET_VERSION,
 } from './crypto.js';
-import { createKMSProvider, LocalKMSProvider } from './kms.js';
+import { LocalKMSProvider } from './kms.js';
 import {
   normalizeBaseUrl,
   normalizeInjectHeader,
@@ -27,7 +23,6 @@ import {
 
 const { Pool } = pg;
 
-const STORE_VERSION = 1;
 const SECRET_NAME = /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/;
 const CAPABILITY_ID = /^cap_[a-f0-9]{20}$/;
 const MAX_SECRET_BYTES = 8 * 1024;
@@ -47,7 +42,27 @@ function validateCapabilityId(id) {
   return id;
 }
 
-// Schema for Postgres
+function redactDsn(dsn) {
+  return String(dsn).replace(/:\/\/[^@]+@/, '://***@');
+}
+
+function getHmacKey(kms) {
+  if (kms instanceof LocalKMSProvider) {
+    return kms.key;
+  }
+  // For AWS KMS, require separate HMAC key via env, not derived from public keyId
+  const hmacEnv = process.env.TGCLOUD_HMAC_KEY;
+  if (hmacEnv) {
+    return parseMasterKey(hmacEnv);
+  }
+  // Fallback: deterministic but not public — hash of keyId + fixed salt (still not ideal, but better than straight SHA256)
+  // In production, set TGCLOUD_HMAC_KEY
+  const keyId = kms.getKeyId();
+  // Use a key derived from keyId plus a non-public component: if kms has a master, use it, else generate ephemeral
+  // For now, throw to force operator to set HMAC key for AWS deployments
+  throw new Error(`AWS KMS deployments require TGCLOUD_HMAC_KEY env (32-byte base64url) for capability HMAC — refusing to derive from public keyId ${keyId}`);
+}
+
 const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS orgs (
   id TEXT PRIMARY KEY,
@@ -78,6 +93,7 @@ CREATE TABLE IF NOT EXISTS secrets (
 
 CREATE TABLE IF NOT EXISTS capabilities (
   id TEXT PRIMARY KEY,
+  org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
   project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
   secret_id TEXT NOT NULL REFERENCES secrets(id) ON DELETE CASCADE,
   secret_name TEXT NOT NULL,
@@ -90,12 +106,21 @@ CREATE TABLE IF NOT EXISTS capabilities (
   allow_http BOOLEAN NOT NULL DEFAULT false,
   expires_at TIMESTAMPTZ,
   metadata_mac TEXT NOT NULL,
+  key_id TEXT NOT NULL DEFAULT 'local',
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE INDEX IF NOT EXISTS idx_capabilities_token_hash ON capabilities(token_hash);
+CREATE INDEX IF NOT EXISTS idx_capabilities_org_project ON capabilities(org_id, project_id);
 CREATE INDEX IF NOT EXISTS idx_secrets_project_name ON secrets(project_id, name);
 CREATE INDEX IF NOT EXISTS idx_capabilities_project ON capabilities(project_id);
+
+-- Migrations for existing DBs (add columns if missing)
+ALTER TABLE capabilities ADD COLUMN IF NOT EXISTS org_id TEXT REFERENCES orgs(id) ON DELETE CASCADE;
+ALTER TABLE capabilities ADD COLUMN IF NOT EXISTS key_id TEXT DEFAULT 'local';
+-- Backfill org_id for existing rows (set to default org)
+UPDATE capabilities SET org_id = 'default' WHERE org_id IS NULL;
+ALTER TABLE capabilities ALTER COLUMN org_id SET NOT NULL;
 
 CREATE TABLE IF NOT EXISTS capability_audit (
   id BIGSERIAL PRIMARY KEY,
@@ -116,41 +141,56 @@ export class PgStore {
     const connectionString = dsn || process.env.DATABASE_URL || process.env.TGCLOUD_SECRETS_DSN;
     if (!connectionString) throw new Error('Postgres DSN required (set DATABASE_URL or TGCLOUD_SECRETS_DSN)');
     this.dsn = connectionString;
+    this.dsnMasked = redactDsn(connectionString);
     this.orgId = orgId;
     this.projectId = projectId;
-    this.pool = new Pool({ connectionString, ...poolConfig });
+    this.globalProjectId = `${orgId}:${projectId}`;
+    const isLocal = /localhost|127\.0\.0\.1/.test(connectionString);
+    this.pool = new Pool({
+      connectionString,
+      ssl: isLocal ? false : { rejectUnauthorized: true },
+      connectionTimeoutMillis: 5000,
+      idleTimeoutMillis: 30000,
+      max: 10,
+      ...poolConfig,
+    });
+    this.pool.on('error', (err) => {
+      console.error(`pg pool error: ${err.message} (dsn ${this.dsnMasked})`);
+    });
     if (kmsProvider) {
       this.kms = kmsProvider;
     } else if (masterKey) {
       this.kms = new LocalKMSProvider({ masterKey, keyId: 'local' });
     } else {
-      this.kms = null; // lazy init via _getKMS from env
+      this.kms = null;
       this._pendingMasterKey = masterKey;
     }
     this._initPromise = null;
   }
 
-  // Lazy import to avoid circular
   async init() {
     if (this._initPromise) return this._initPromise;
     this._initPromise = (async () => {
+      const kms = await this._getKMS();
       const client = await this.pool.connect();
       try {
         await client.query(SCHEMA_SQL);
-        // Ensure default org/project exists
         await client.query(
           `INSERT INTO orgs (id, name, kms_key_id) VALUES ($1, $2, $3) ON CONFLICT (id) DO NOTHING`,
-          [this.orgId, this.orgId, this.kms.getKeyId()]
+          [this.orgId, this.orgId, kms.getKeyId()]
         );
         await client.query(
           `INSERT INTO projects (id, org_id, name) VALUES ($1, $2, $3) ON CONFLICT (id) DO NOTHING`,
-          [this.projectId, this.orgId, this.projectId]
+          [this.globalProjectId, this.orgId, this.projectId]
         );
       } finally {
         client.release();
       }
       return this;
     })();
+    this._initPromise.catch(() => {
+      this._initPromise = null;
+    });
     return this._initPromise;
   }
 
@@ -161,11 +201,20 @@ export class PgStore {
   async _getKMS() {
     if (this.kms) return this.kms;
     const { createKMSProvider } = await import('./kms.js');
-    // try env-based provider, fallback to local generated
     try {
       this.kms = createKMSProvider({ masterKey: this._pendingMasterKey });
-    } catch {
-      this.kms = new LocalKMSProvider({ masterKey: generateMasterKey(), keyId: 'local' });
+    } catch (e) {
+      if (String(e.message).includes('Local KMS requires')) {
+        // For Postgres production, ephemeral is data loss — fail fast unless explicitly allowed
+        if (process.env.ALLOW_EPHEMERAL_KMS === '1' || process.env.NODE_ENV === 'test') {
+          console.warn('Warning: using ephemeral local KMS key — data will be lost on restart. Set TGCLOUD_MASTER_KEY for persistence.');
+          this.kms = new LocalKMSProvider({ masterKey: generateMasterKey(), keyId: 'local' });
+        } else {
+          throw new Error('Local KMS requires TGCLOUD_MASTER_KEY env (32-byte base64url). Generate with: node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'base64url\'))" (or set ALLOW_EPHEMERAL_KMS=1 for dev)');
+        }
+      } else {
+        throw e;
+      }
     }
     return this.kms;
   }
@@ -179,15 +228,19 @@ export class PgStore {
     const kms = await this._getKMS();
     const { plaintext: dek, ciphertextBlob: dekCiphertext, keyId } = await kms.generateDataKey();
     const encrypted = encryptSecretEnvelope(value, dek, name, { orgId, projectId, keyId, dekCiphertext });
-    const id = `${projectId}:${name}`;
+    const globalProjectId = `${orgId}:${projectId}`;
+    const id = `${globalProjectId}:${name}`;
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
+      // Ensure org/project exists for this org/project
+      await client.query(`INSERT INTO orgs (id, name, kms_key_id) VALUES ($1, $2, $3) ON CONFLICT (id) DO NOTHING`, [orgId, orgId, keyId]);
+      await client.query(`INSERT INTO projects (id, org_id, name) VALUES ($1, $2, $3) ON CONFLICT (id) DO NOTHING`, [globalProjectId, orgId, projectId]);
       await client.query(
         `INSERT INTO secrets (id, project_id, name, encrypted_blob, dek_ciphertext, key_id, version, updated_at)
          VALUES ($1, $2, $3, $4, $5, $6, 3, now())
          ON CONFLICT (project_id, name) DO UPDATE SET encrypted_blob=$4, dek_ciphertext=$5, key_id=$6, version=3, updated_at=now()`,
-        [id, projectId, name, JSON.stringify(encrypted), dekCiphertext, keyId]
+        [id, globalProjectId, name, JSON.stringify(encrypted), dekCiphertext, keyId]
       );
       await client.query('COMMIT');
     } catch (e) {
@@ -201,23 +254,21 @@ export class PgStore {
   async getSecret(name, { orgId = this.orgId, projectId = this.projectId } = {}) {
     validateSecretName(name);
     await this.init();
+    const globalProjectId = `${orgId}:${projectId}`;
     const res = await this.pool.query(
       `SELECT encrypted_blob, dek_ciphertext, key_id, version FROM secrets WHERE project_id=$1 AND name=$2`,
-      [projectId, name]
+      [globalProjectId, name]
     );
     if (res.rows.length === 0) throw new Error(`Secret not found: ${name}`);
     const row = res.rows[0];
     const record = typeof row.encrypted_blob === 'string' ? JSON.parse(row.encrypted_blob) : row.encrypted_blob;
-    // v2 fallback (no dek)
     if (record.version === 2 || record.version === ENCRYPTED_SECRET_VERSION) {
-      // For v2, we need masterKey — try KMS local master
       const kms = await this._getKMS();
       if (kms instanceof LocalKMSProvider) {
         return decryptSecret(record, kms.key, name);
       }
       throw new Error('v2 record requires local master key, use file store migration');
     }
-    // v3 envelope
     const kms = await this._getKMS();
     const dek = await kms.decrypt(row.dek_ciphertext);
     return decryptSecretWithDEK(record, dek, name, orgId, projectId);
@@ -225,7 +276,8 @@ export class PgStore {
 
   async listSecrets({ orgId = this.orgId, projectId = this.projectId } = {}) {
     await this.init();
-    const res = await this.pool.query(`SELECT name, updated_at FROM secrets WHERE project_id=$1 ORDER BY name`, [projectId]);
+    const globalProjectId = `${orgId}:${projectId}`;
+    const res = await this.pool.query(`SELECT name, updated_at FROM secrets WHERE project_id=$1 ORDER BY name`, [globalProjectId]);
     return res.rows.map((r) => ({ name: r.name, updatedAt: r.updated_at.toISOString() }));
   }
 
@@ -249,24 +301,17 @@ export class PgStore {
     const normalizedHeader = normalizeInjectHeader(injectHeader);
     const normalizedInjectPrefix = normalizeInjectPrefix(injectPrefix);
     if (typeof allowHttp !== 'boolean') throw new Error('allowHttp must be a boolean');
-    // Verify secret exists
-    const secretRes = await this.pool.query(`SELECT id FROM secrets WHERE project_id=$1 AND name=$2`, [projectId, secretName]);
+    const globalProjectId = `${orgId}:${projectId}`;
+    const secretRes = await this.pool.query(`SELECT id FROM secrets WHERE project_id=$1 AND name=$2`, [globalProjectId, secretName]);
     if (secretRes.rows.length === 0) throw new Error(`Secret not found: ${secretName}`);
     const secretId = secretRes.rows[0].id;
     const kms = await this._getKMS();
     const keyId = kms.getKeyId();
-    // Use KMS master key for HMAC — for local, use masterKey; for AWS, use a derived HMAC key (use dek for now, but better to use separate)
-    // For simplicity, use a stable HMAC key derived from KMS keyId + local master if available
     let hmacKey;
-    if (kms instanceof LocalKMSProvider) {
-      hmacKey = kms.key;
-    } else {
-      // For AWS, use a local HMAC key derived from keyId (not ideal, but for envelope we use KMS for DEK, HMAC can be separate)
-      // Generate a stable key from keyId hash
-      const { createHash } = await import('node:crypto');
-      hmacKey = createHash('sha256').update(String(keyId)).digest();
-      // Pad to 32 bytes
-      if (hmacKey.length < 32) hmacKey = Buffer.concat([hmacKey, Buffer.alloc(32 - hmacKey.length)]);
+    try {
+      hmacKey = getHmacKey(kms);
+    } catch (e) {
+      throw new Error(`HMAC key not configured for KMS ${keyId}: ${e.message}`);
     }
 
     const id = `cap_${randomBytes(10).toString('hex')}`;
@@ -290,9 +335,9 @@ export class PgStore {
     capability.metadataMac = hashCapabilityMetadata(capability, hmacKey);
 
     await this.pool.query(
-      `INSERT INTO capabilities (id, project_id, secret_id, secret_name, token_hash, base_url, path_prefix, methods, inject_header, inject_prefix, allow_http, expires_at, metadata_mac)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
-      [id, projectId, secretId, secretName, capability.tokenHash, normalizedBaseUrl, normalizedPathPrefix, JSON.stringify(normalizedMethods), normalizedHeader, normalizedInjectPrefix, allowHttp, expiresAt, capability.metadataMac]
+      `INSERT INTO capabilities (id, org_id, project_id, secret_id, secret_name, token_hash, base_url, path_prefix, methods, inject_header, inject_prefix, allow_http, expires_at, metadata_mac, key_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
+      [id, orgId, globalProjectId, secretId, secretName, capability.tokenHash, normalizedBaseUrl, normalizedPathPrefix, JSON.stringify(normalizedMethods), normalizedHeader, normalizedInjectPrefix, allowHttp, expiresAt, capability.metadataMac, keyId]
     );
 
     return {
@@ -314,9 +359,10 @@ export class PgStore {
 
   async listCapabilities({ orgId = this.orgId, projectId = this.projectId } = {}) {
     await this.init();
+    const globalProjectId = `${orgId}:${projectId}`;
     const res = await this.pool.query(
-      `SELECT id, secret_name, base_url, path_prefix, methods, inject_header, inject_prefix, allow_http, expires_at, created_at FROM capabilities WHERE project_id=$1 ORDER BY created_at`,
-      [projectId]
+      `SELECT id, secret_name, base_url, path_prefix, methods, inject_header, inject_prefix, allow_http, expires_at, created_at FROM capabilities WHERE org_id=$1 AND project_id=$2 ORDER BY created_at`,
+      [orgId, globalProjectId]
     );
     return res.rows.map((r) => ({
       id: r.id,
@@ -332,37 +378,42 @@ export class PgStore {
     }));
   }
 
-  async revokeCapability(id, { projectId = this.projectId } = {}) {
+  async revokeCapability(id, { orgId = this.orgId, projectId = this.projectId } = {}) {
     validateCapabilityId(id);
     await this.init();
-    const res = await this.pool.query(`DELETE FROM capabilities WHERE id=$1 AND project_id=$2`, [id, projectId]);
+    const globalProjectId = `${orgId}:${projectId}`;
+    const res = await this.pool.query(`DELETE FROM capabilities WHERE id=$1 AND org_id=$2 AND project_id=$3`, [id, orgId, globalProjectId]);
     return res.rowCount > 0;
   }
 
   async resolveCapability(token) {
     if (typeof token !== 'string' || token.length < 16 || token.length > 256) return null;
     await this.init();
-    // Find by token hash — need to compute hash and look up, but we store hash, so we hash token and query
     const tokenHash = hashCapability(token);
+    // Tenant-isolated lookup: token_hash is globally unique, but we verify org/project after
     const res = await this.pool.query(
-      `SELECT c.*, s.encrypted_blob, s.dek_ciphertext, s.key_id as secret_key_id, s.version as secret_version
-       FROM capabilities c JOIN secrets s ON c.secret_id = s.id
+      `SELECT c.*, s.encrypted_blob, s.dek_ciphertext, s.key_id as secret_key_id, s.version as secret_version, p.org_id as proj_org_id
+       FROM capabilities c 
+       JOIN secrets s ON c.secret_id = s.id
+       JOIN projects p ON c.project_id = p.id
        WHERE c.token_hash=$1`,
       [tokenHash]
     );
     if (res.rows.length === 0) return null;
     const row = res.rows[0];
-    // Check expiresAt
+    // Enforce tenant isolation: capability's org/project must match this store's tenant OR allow cross-tenant only if explicitly configured
+    // For now, enforce exact match on org and project
+    if (row.org_id !== this.orgId || row.project_id !== this.globalProjectId) {
+      // Optionally allow if store is configured as global, but for multi-tenant we deny
+      return null;
+    }
     if (row.expires_at && new Date(row.expires_at) < new Date()) return null;
-    // Verify metadataMac
     const kms = await this._getKMS();
     let hmacKey;
-    if (kms instanceof LocalKMSProvider) {
-      hmacKey = kms.key;
-    } else {
-      const { createHash } = await import('node:crypto');
-      hmacKey = createHash('sha256').update(String(row.key_id || 'local')).digest();
-      if (hmacKey.length < 32) hmacKey = Buffer.concat([hmacKey, Buffer.alloc(32 - hmacKey.length)]);
+    try {
+      hmacKey = getHmacKey(kms);
+    } catch {
+      return null;
     }
     const capForMac = {
       id: row.id,
@@ -374,12 +425,11 @@ export class PgStore {
       injectHeader: row.inject_header,
       injectPrefix: row.inject_prefix,
       allowHttp: row.allow_http,
-      orgId: this.orgId,
-      projectId: row.project_id,
+      orgId: row.org_id,
+      projectId: row.project_id.replace(`${row.org_id}:`, ''),
       keyId: row.key_id || 'local',
       expiresAt: row.expires_at,
     };
-    // Validate stored capability fields
     const candidate = {
       id: row.id,
       secretName: row.secret_name,
@@ -392,7 +442,6 @@ export class PgStore {
       tokenHash: row.token_hash,
       metadataMac: row.metadata_mac,
     };
-    // Re-use validate logic from file store but inline
     try {
       if (normalizeBaseUrl(candidate.baseUrl, { allowHttp: candidate.allowHttp }) !== candidate.baseUrl) return null;
       if (normalizePathPrefix(candidate.pathPrefix) !== candidate.pathPrefix) return null;
@@ -406,7 +455,6 @@ export class PgStore {
     const { capabilityMetadataMatches } = await import('./crypto.js');
     if (!capabilityMetadataMatches(capForMac, hmacKey, row.metadata_mac)) return null;
 
-    // Decrypt secret
     const record = typeof row.encrypted_blob === 'string' ? JSON.parse(row.encrypted_blob) : row.encrypted_blob;
     let secretValue;
     if (record.version === 2) {
@@ -417,7 +465,10 @@ export class PgStore {
       }
     } else {
       const dek = await kms.decrypt(row.dek_ciphertext);
-      secretValue = decryptSecretWithDEK(record, dek, row.secret_name, this.orgId, row.project_id);
+      // Use stored org/project for AAD, not instance default
+      const storedOrg = row.org_id;
+      const storedProj = row.project_id.replace(`${storedOrg}:`, '');
+      secretValue = decryptSecretWithDEK(record, dek, row.secret_name, storedOrg, storedProj);
     }
 
     return {
@@ -429,8 +480,8 @@ export class PgStore {
       injectHeader: capForMac.injectHeader,
       injectPrefix: capForMac.injectPrefix,
       allowHttp: capForMac.allowHttp,
-      orgId: this.orgId,
-      projectId: row.project_id,
+      orgId: row.org_id,
+      projectId: row.project_id.replace(`${row.org_id}:`, ''),
       keyId: row.key_id,
       expiresAt: row.expires_at,
       secretValue,
@@ -439,14 +490,12 @@ export class PgStore {
     };
   }
 
-  // For healthz
   async healthCheck() {
-    await this.pool.query('SELECT 1');
+    await this.pool.query({ text: 'SELECT 1', timeout: 3000 });
     const kms = await this._getKMS();
-    // try generate+decrypt roundtrip
     const { plaintext, ciphertextBlob } = await kms.generateDataKey();
     const dek2 = await kms.decrypt(ciphertextBlob);
-    if (!timingSafeEqual(plaintext, dek2)) throw new Error('KMS health check failed');
+    if (plaintext.length !== dek2.length || !timingSafeEqual(plaintext, dek2)) throw new Error('KMS health check failed');
     return true;
   }
 }

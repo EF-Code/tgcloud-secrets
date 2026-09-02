@@ -4,7 +4,8 @@ services:
     image: postgres:15
     environment:
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
+      # INSECURE EXAMPLE - use POSTGRES_PASSWORD_FILE or env interpolation in production
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
       POSTGRES_DB: tgcloud
     ports:
       - "5432:5432"

@@ -65,6 +65,6 @@ test('AwsKMSProvider caches decrypt', async () => {
 
 test('LocalKMSProvider invalid ciphertext rejected', async () => {
   const kms = new LocalKMSProvider({ masterKey: generateMasterKey(), keyId: 'local' });
-  await assert.rejects(() => kms.decrypt('invalid'), /Invalid/);
+  await assert.rejects(() => kms.decrypt('invalid'), /Invalid|cannot decrypt|keyId mismatch/);
   await assert.rejects(() => kms.decrypt('a.b.c'), /Invalid/);
 });

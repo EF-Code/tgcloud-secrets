@@ -45,7 +45,12 @@ export class LocalKMSProvider {
   }
 
   async decrypt(ciphertextBlob) {
-    const [tagB64, ivB64, ctB64] = String(ciphertextBlob).split('.');
+    const raw = String(ciphertextBlob);
+    // Detect AWS format (no dots) vs local format (tag.iv.ct)
+    if (!raw.includes('.')) {
+      throw new Error(`Local KMS cannot decrypt AWS-format ciphertext (keyId mismatch: expected local, got ${this.keyId})`);
+    }
+    const [tagB64, ivB64, ctB64] = raw.split('.');
     if (!tagB64 || !ivB64 || !ctB64) throw new Error('Invalid local DEK ciphertext');
     const tag = decode(tagB64);
     const iv = decode(ivB64);
@@ -96,10 +101,14 @@ export class AwsKMSProvider {
   }
 
   async decrypt(ciphertextBlob) {
+    const raw = String(ciphertextBlob);
+    if (raw.includes('.')) {
+      throw new Error(`AWS KMS cannot decrypt local-format ciphertext (keyId mismatch: expected ${this.keyId}, got local)`);
+    }
     const cached = this.cache.get(ciphertextBlob);
     if (cached && Date.now() < cached.expiresAt) return cached.dek;
     const resp = await this.client.send(new DecryptCommand({
-      CiphertextBlob: Buffer.from(String(ciphertextBlob), 'base64url'),
+      CiphertextBlob: Buffer.from(raw, 'base64url'),
     }));
     if (!resp.Plaintext) throw new Error('KMS Decrypt failed');
     const dek = Buffer.from(resp.Plaintext);

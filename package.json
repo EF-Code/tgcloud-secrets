@@ -7,7 +7,10 @@
     "tgcloud-secrets": "src/cli.js"
   },
   "exports": {
-    "./runtime": "./runtime/secret-fetch.js"
+    "./runtime": "./runtime/secret-fetch.js",
+    "./src/*": "./src/*.js",
+    "./pg-store": "./src/pg-store.js",
+    "./kms": "./src/kms.js"
   },
   "files": [
     "LICENSE",

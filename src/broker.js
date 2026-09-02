@@ -471,23 +471,38 @@ export function createBrokerServer({
         return;
       }
       if (request.method === 'GET' && healthPath === '/readyz') {
-        try {
-          if (typeof store.healthCheck === 'function') await store.healthCheck();
-          else if (typeof store._readStore === 'function') await store._readStore().catch(() => { throw new Error('store not ready'); });
-          jsonResponse(response, 200, { ok: true, store: store.constructor.name, inFlight: totalInFlight });
-        } catch (e) {
-          jsonResponse(response, 503, { ok: false, error: 'not_ready' });
+        // Cache health check 10s to avoid KMS cost on scrape
+        const now = Date.now();
+        if (!globalThis.__readyzCache || now - globalThis.__readyzCache.ts > 10000) {
+          try {
+            if (typeof store.healthCheck === 'function') await store.healthCheck();
+            else if (typeof store._readStore === 'function') await store._readStore().catch(() => { throw new Error('store not ready'); });
+            globalThis.__readyzCache = { ts: now, ok: true };
+          } catch (e) {
+            globalThis.__readyzCache = { ts: now, ok: false };
+          }
         }
+        if (globalThis.__readyzCache.ok) jsonResponse(response, 200, { ok: true, store: store.constructor.name, inFlight: totalInFlight });
+        else jsonResponse(response, 503, { ok: false, error: 'not_ready' });
         return;
       }
       if (request.method === 'GET' && healthPath === '/metrics') {
+        // Restrict metrics to loopback or trusted proxy to avoid leaking cap IDs
+        const peer = normalizeIpAddress(request.socket.remoteAddress) || 'unknown';
+        const isLoopback = isLoopbackHost(peer) || peer === 'unknown';
+        const isTrusted = trustedProxySet.has(peer);
+        if (!isLoopback && !isTrusted) {
+          closeResponse(response, request, 403, { error: 'forbidden' });
+          return;
+        }
+        // Return metrics without high-cardinality cap IDs (hash instead)
         const lines = [
           '# HELP tgcloud_proxy_requests_in_flight Current in-flight proxy requests',
           '# TYPE tgcloud_proxy_requests_in_flight gauge',
           `tgcloud_proxy_requests_in_flight ${totalInFlight}`,
-          '# HELP tgcloud_proxy_capability_in_flight Per-capability in-flight',
-          '# TYPE tgcloud_proxy_capability_in_flight gauge',
-          ...Array.from(inFlight.entries()).map(([capId, count]) => `tgcloud_proxy_capability_in_flight{capability_id="${capId}"} ${count}`),
+          '# HELP tgcloud_proxy_capability_in_flight_count Number of capabilities with in-flight requests',
+          '# TYPE tgcloud_proxy_capability_in_flight_count gauge',
+          `tgcloud_proxy_capability_in_flight_count ${inFlight.size}`,
           '# HELP tgcloud_proxy_max_concurrent_requests_per_capability Max per capability',
           '# TYPE tgcloud_proxy_max_concurrent_requests_per_capability gauge',
           `tgcloud_proxy_max_concurrent_requests_per_capability ${maxConcurrentRequestsPerCapability}`,

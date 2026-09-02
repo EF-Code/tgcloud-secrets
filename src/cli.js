@@ -99,7 +99,7 @@ const ALLOWED_OPTIONS = {
   caps: new Set(['data-dir', 'dsn', 'org', 'project', 'kms-key-id', 'json']),
   revoke: new Set(['data-dir', 'dsn', 'org', 'project', 'kms-key-id', 'json']),
   serve: new Set(['data-dir', 'dsn', 'org', 'project', 'kms-key-id', 'host', 'port', 'trusted-proxy', 'allow-public']),
-  migrate: new Set(['from', 'to', 'org', 'project', 'kms-key-id', 'json']),
+  migrate: new Set(['from', 'to', 'org', 'project', 'kms-key-id', 'json', 'dry-run']),
   healthcheck: new Set(['dsn', 'kms-key-id', 'json']),
 };
 
@@ -108,7 +108,7 @@ function validateCommandArgs(command, positional, options) {
   for (const name of Object.keys(options)) {
     if (!ALLOWED_OPTIONS[command].has(name)) throw new Error(`Unknown option for ${command}: --${name}`);
   }
-  for (const name of ['json', 'allow-http', 'allow-public']) {
+  for (const name of ['json', 'allow-http', 'allow-public', 'dry-run']) {
     if (options[name] !== undefined && options[name] !== true) throw new Error(`--${name} is a flag and does not take a value`);
   }
   if (options['data-dir'] !== undefined && options['data-dir'].length === 0) throw new Error('--data-dir must not be empty');
@@ -153,22 +153,26 @@ function kmsKeyIdOption(options) {
 }
 
 function createStore(options) {
+  const hasExplicitDsn = options['dsn'] !== undefined;
+  const hasExplicitDataDir = options['data-dir'] !== undefined;
   const dsn = dsnOption(options);
   const orgId = orgOption(options);
   const projectId = projectOption(options);
   const kmsKeyId = kmsKeyIdOption(options);
+  // Explicit --data-dir takes precedence over env DATABASE_URL to avoid surprise
+  if (hasExplicitDataDir && !hasExplicitDsn && dsn && process.env.DATABASE_URL) {
+    console.warn(`Warning: --data-dir ignored because DATABASE_URL is set (using Postgres). Unset DATABASE_URL or use --dsn to override.`);
+  }
+  if (hasExplicitDataDir && !hasExplicitDsn) {
+    return new SecretStore({ dataDir: dataDirOption(options) });
+  }
   if (dsn) {
-    // Use Postgres + KMS
     const masterKeyEnv = process.env.TGCLOUD_MASTER_KEY;
     let kmsProvider = null;
     if (kmsKeyId === 'local' && masterKeyEnv) {
       kmsProvider = new LocalKMSProvider({ masterKey: masterKeyEnv, keyId: 'local' });
     } else if (kmsKeyId !== 'local') {
-      // Will be created lazily via PgStore _getKMS
       kmsProvider = null;
-    } else if (kmsKeyId === 'local') {
-      // For local dev without env, generate ephemeral key (not persistent across restarts — warn)
-      // PgStore will generate one, but we warn
     }
     return new PgStore({ dsn, orgId, projectId, kmsProvider, masterKey: masterKeyEnv || undefined });
   }
@@ -226,7 +230,8 @@ async function run(argv) {
   if (command === 'init') {
     await store.init();
     if (isPgStore) {
-      printJsonOrText(options, { dsn: dsnOption(options), orgId, projectId }, `Initialized Postgres store for org ${orgId} project ${projectId}`);
+      const maskedDsn = dsnOption(options) ? String(dsnOption(options)).replace(/:\/\/[^@]+@/, '://***@') : 'postgres://***';
+      printJsonOrText(options, { dsn: maskedDsn, orgId, projectId }, `Initialized Postgres store for org ${orgId} project ${projectId}`);
     } else {
       printJsonOrText(options, { dataDir: dataDirOption(options) }, `Initialized private secret store in ${dataDirOption(options)}`);
     }
@@ -254,6 +259,7 @@ async function run(argv) {
     if (!secretName || !baseUrl) throw new Error('Usage: tgcloud-secrets grant <secret> --base-url <url>');
     let expiresAt = null;
     if (options['expires-at']) {
+      if (!isPgStore) throw new Error('--expires-at requires Postgres store (--dsn or DATABASE_URL)');
       const d = new Date(options['expires-at']);
       if (Number.isNaN(d.getTime())) throw new Error('--expires-at must be valid ISO8601');
       expiresAt = d.toISOString();
@@ -316,34 +322,52 @@ async function run(argv) {
     return;
   }
   if (command === 'healthcheck') {
-    await store.init();
-    if (isPgStore && typeof store.healthCheck === 'function') {
-      await store.healthCheck();
-      printJsonOrText(options, { ok: true, store: 'postgres', kms: kmsKeyIdOption(options) }, 'Health check passed: Postgres + KMS reachable');
-    } else {
+    try {
       await store.init();
-      printJsonOrText(options, { ok: true, store: 'file' }, 'Health check passed: file store reachable');
+      if (isPgStore && typeof store.healthCheck === 'function') {
+        await store.healthCheck();
+        printJsonOrText(options, { ok: true, store: 'postgres', kms: kmsKeyIdOption(options) }, 'Health check passed: Postgres + KMS reachable');
+      } else {
+        printJsonOrText(options, { ok: true, store: 'file' }, 'Health check passed: file store reachable');
+      }
+    } finally {
+      if (isPgStore) await store.close().catch(() => {});
     }
-    if (isPgStore) await store.close();
     return;
   }
   if (command === 'migrate') {
     const from = options['from'] || dataDirOption(options);
     const to = options['to'] || dsnOption(options);
     if (!to) throw new Error('migrate requires --to <dsn> (or DATABASE_URL env)');
+    const isDryRun = options['dry-run'] === true || options['dry-run'] === 'true';
     const fileStore = new SecretStore({ dataDir: from });
     await fileStore.init();
-    const pgStore = isPgStore ? store : new PgStore({ dsn: to, orgId, projectId, kmsProvider: store.kms || null });
+    const pgStore = isPgStore ? store : new PgStore({ dsn: to, orgId, projectId, kmsProvider: store.kms || null, masterKey: process.env.TGCLOUD_MASTER_KEY });
     await pgStore.init();
     const secrets = await fileStore.listSecrets();
+    let migrated = 0;
+    let skipped = 0;
     for (const { name } of secrets) {
+      const exists = await pgStore.pool.query(`SELECT 1 FROM secrets WHERE project_id=$1 AND name=$2`, [`${orgId}:${projectId}`, name]);
+      if (exists.rows.length > 0) {
+        console.log(`Skipped existing secret ${name} (already in Postgres)`);
+        skipped++;
+        continue;
+      }
+      if (isDryRun) {
+        console.log(`[dry-run] Would migrate secret ${name}`);
+        migrated++;
+        continue;
+      }
       const value = await fileStore.getSecret(name);
       await pgStore.setSecret(name, value, { orgId, projectId });
       console.log(`Migrated secret ${name}`);
+      migrated++;
     }
     const caps = await fileStore.listCapabilities();
     console.log(`Note: capabilities must be re-granted after migration (tokens are hashed, cannot be migrated). Found ${caps.length} capabilities in file store.`);
-    printJsonOrText(options, { migratedSecrets: secrets.length, capabilitiesFound: caps.length }, `Migrated ${secrets.length} secrets to Postgres`);
+    if (isDryRun) console.log(`[dry-run] Would migrate ${migrated} secrets, skipped ${skipped}`);
+    printJsonOrText(options, { migratedSecrets: migrated, skipped, capabilitiesFound: caps.length, dryRun: isDryRun }, `${isDryRun ? '[dry-run] ' : ''}Migrated ${migrated} secrets to Postgres (skipped ${skipped})`);
     if (pgStore !== store) await pgStore.close();
     return;
   }

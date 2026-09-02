@@ -128,6 +128,8 @@ function assertLockFile(info, path) {
 
 function isProcessAlive(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return false;
+  // pid 1 is init, never a tgcloud-secrets worker — treat as not alive for stale lock purposes
+  if (pid === 1) return false;
   try {
     process.kill(pid, 0);
     return true;
@@ -310,6 +312,22 @@ export class SecretStore {
       || !parsed.capabilities || typeof parsed.capabilities !== 'object' || Array.isArray(parsed.capabilities)
     ) {
       throw new Error('Unsupported secret store format');
+    }
+    // Reject proto-pollution keys on read (including prototype pollution via __proto__)
+    const secretsProto = Object.getPrototypeOf(parsed.secrets);
+    const capsProto = Object.getPrototypeOf(parsed.capabilities);
+    if (secretsProto !== Object.prototype || capsProto !== Object.prototype) {
+      throw new Error('Unsupported secret store format: prototype pollution');
+    }
+    for (const key of [...Object.getOwnPropertyNames(parsed.secrets), ...Object.getOwnPropertyNames(parsed.capabilities)]) {
+      if (key === '__proto__' || key === 'constructor' || key === 'prototype') {
+        throw new Error('Unsupported secret store format: reserved key');
+      }
+      // Also reject any key that is not a valid secret or capability id but is present
+      if (!SECRET_NAME.test(key) && !CAPABILITY_ID.test(key)) {
+        // If it's an own property with invalid name, treat as tampered
+        throw new Error(`Unsupported secret store format: invalid key ${key}`);
+      }
     }
     return parsed;
   }
