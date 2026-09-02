@@ -43,7 +43,7 @@ export function isSafeHeaderValue(value) {
 }
 
 function normalizeHostname(hostname) {
-  return String(hostname).toLowerCase().replace(/^\[|\]$/g, '').replace(/\.+$/, '');
+  return String(hostname).toLowerCase().replace(/^\[|\]$/g, '').split('%')[0].replace(/\.+$/, '');
 }
 
 function decodePathForPolicy(value, message) {
@@ -71,7 +71,7 @@ function decodePathForPolicy(value, message) {
   }
   // A bounded fixed-point decode avoids unbounded work while still rejecting
   // a nested encoding that a downstream framework might decode later.
-  if (/%(?:2e|5c|00)/i.test(decoded)) {
+  if (/%(?:2e|2f|5c|00)/i.test(decoded)) {
     throw new Error(`${message} contains a forbidden encoded character`);
   }
   return decoded;
@@ -95,6 +95,9 @@ export function normalizeBaseUrl(value, { allowHttp = false } = {}) {
     throw new Error('Base URL must be a valid HTTPS URL');
   }
 
+  if (url.hostname.endsWith('.')) {
+    throw new Error('Base URL must not contain a trailing dot');
+  }
   if (url.username || url.password || url.search || url.hash) {
     throw new Error('Base URL must not contain credentials, query parameters, or a fragment');
   }
@@ -156,7 +159,19 @@ export function resolveUpstreamUrl(baseUrl, requestPath, pathPrefix) {
     throw new Error('Request path is outside this capability path policy');
   }
 
+  if (/%(?:25)*2f/i.test(url.pathname) || /%(?:25)*2f/i.test(requestPath.split('?')[0].split('#')[0])) {
+    throw new Error('Request path contains a forbidden encoded character');
+  }
   decodePathForPolicy(url.pathname, 'Request path');
+  if (url.search && (UNSAFE_PATH_VALUE.test(url.search) || url.search.includes('\\') || url.search.includes('\0'))) {
+    throw new Error('Request path contains a forbidden character');
+  }
+  if (url.hash && (UNSAFE_PATH_VALUE.test(url.hash) || url.hash.includes('\\') || url.hash.includes('\0'))) {
+    throw new Error('Request path contains a forbidden character');
+  }
+  if (/%00/i.test(url.search) || /%00/i.test(url.hash)) {
+    throw new Error('Request path contains a forbidden encoded character');
+  }
   return url;
 }
 
@@ -222,24 +237,29 @@ export function isLoopbackHost(hostname) {
 function isPrivateIpv4(hostname) {
   const octets = hostname.split('.').map(Number);
   if (octets.length !== 4 || octets.some((octet) => !Number.isInteger(octet) || octet < 0 || octet > 255)) return false;
-  const [first, second] = octets;
+  const [first, second, third] = octets;
   return first === 0
     || first === 10
     || first === 127
     || (first === 100 && second >= 64 && second <= 127)
     || (first === 169 && second === 254)
     || (first === 172 && second >= 16 && second <= 31)
-    || (first === 192 && second === 0)
+    || (first === 192 && second === 0 && third === 2)
+    || (first === 192 && second === 88 && third === 99)
     || (first === 192 && second === 168)
     || (first === 198 && (second === 18 || second === 19))
+    || (first === 198 && second === 51 && third === 100)
+    || (first === 203 && second === 0 && third === 113)
     || first >= 224;
 }
 
 export function isPrivateHost(hostname) {
   const normalized = normalizeHostname(hostname);
-  // URL parsers may canonicalize an IPv4-mapped address to hexadecimal form;
-  // reject the entire mapped range rather than risk missing a private target.
-  if (normalized.startsWith('::ffff:')) return true;
+  if (normalized.startsWith('::ffff:')) {
+    const v4 = normalized.slice(7);
+    if (isIP(v4) === 4) return isPrivateIpv4(v4);
+    return true;
+  }
   if (isSafeHttpHost(normalized)) return true;
   if (isIP(normalized) === 4) return isPrivateIpv4(normalized);
   if (isIP(normalized) === 6) {
