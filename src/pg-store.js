@@ -422,8 +422,8 @@ export class PgStore {
        FROM capabilities c 
        JOIN secrets s ON c.secret_id = s.id
        JOIN projects p ON c.project_id = p.id
-       WHERE c.token_hash=$1`,
-      [tokenHash]
+       WHERE c.token_hash=$1 AND c.org_id=$2 AND c.project_id=$3`,
+      [tokenHash, this.orgId, this.globalProjectId]
     );
     if (res.rows.length === 0) return null;
     const row = res.rows[0];
