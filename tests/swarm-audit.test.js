@@ -20,3 +20,9 @@ test('2 - decodePathForPolicy blocks encoded slash %2f', () => {
   assert.throws(() => resolveUpstreamUrl('https://api.example.com/', '/v1/%2Fadmin', '/v1/'), /forbidden encoded/);
 });
 
+
+test('3 - trailing dot rejected in normalizeBaseUrl', () => {
+  assert.throws(() => normalizeBaseUrl('https://api.example.com.'), /trailing dot/);
+  assert.throws(() => normalizeBaseUrl('https://api.example.com./'), /trailing dot/);
+});
+
