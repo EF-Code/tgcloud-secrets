@@ -14,3 +14,9 @@ test('1 - isPrivateHost strips zone identifier %lo0', () => {
   assert.equal(isPrivateHost('fe80::1%eth0'), true);
 });
 
+
+test('2 - decodePathForPolicy blocks encoded slash %2f', () => {
+  assert.throws(() => resolveUpstreamUrl('https://api.example.com/', '/v1/%2fadmin', '/v1/'), /forbidden encoded/);
+  assert.throws(() => resolveUpstreamUrl('https://api.example.com/', '/v1/%2Fadmin', '/v1/'), /forbidden encoded/);
+});
+
