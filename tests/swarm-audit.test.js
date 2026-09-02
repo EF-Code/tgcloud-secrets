@@ -53,3 +53,10 @@ test('8 - isPrivateIpv4 precise TEST-NET-1 192.0.2.1', () => {
   assert.equal(isPrivateHost('192.0.1.1'), false);
 });
 
+
+test('9 - isPrivateIpv4 TEST-NET-2 198.51.100.1', () => {
+  assert.equal(isPrivateHost('198.51.100.1'), true);
+  assert.equal(isPrivateHost('198.51.100.5'), true);
+  assert.equal(isPrivateHost('198.51.101.1'), false);
+});
+
