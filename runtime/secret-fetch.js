@@ -90,3 +90,4 @@ export function createSecretFetch({ endpoint, capability, fetchImpl = globalThis
 export function secretFetch(config, path, init) {
   return createSecretFetch(config)(path, init);
 }
+// runtime isLoopback now aligns with policy
