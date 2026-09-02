@@ -47,3 +47,9 @@ test('7 - encoded null %00 in query blocked', () => {
   assert.throws(() => resolveUpstreamUrl('https://api.example.com/', '/v1/health?evil=%00', '/v1/'), /forbidden encoded/);
 });
 
+
+test('8 - isPrivateIpv4 precise TEST-NET-1 192.0.2.1', () => {
+  assert.equal(isPrivateHost('192.0.2.1'), true);
+  assert.equal(isPrivateHost('192.0.1.1'), false);
+});
+
