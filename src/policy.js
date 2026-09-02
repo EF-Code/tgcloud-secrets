@@ -169,21 +169,22 @@ export function resolveUpstreamUrl(baseUrl, requestPath, pathPrefix) {
     if (UNSAFE_PATH_VALUE.test(value) || value.includes('\\') || value.includes('\0')) {
       throw new Error(`${label} contains a forbidden character`);
     }
-    // Check for encoded controls in query/fragment (e.g., %0a, %0d, %09, %1f, %7f, %00)
     if (/%(?:0a|0d|09|1f|7f|00)/i.test(value)) {
       throw new Error(`${label} contains a forbidden encoded character`);
     }
-    // Also check double-encoded via decode loop
     let decoded = value;
     for (let i = 0; i < 3; i++) {
+      let next;
       try {
-        const next = decodeURIComponent(decoded);
-        if (next === decoded) break;
-        decoded = next;
-        if (UNSAFE_PATH_VALUE.test(decoded) || /%00/i.test(decoded)) {
-          throw new Error(`${label} contains a forbidden encoded character`);
-        }
-      } catch { break; }
+        next = decodeURIComponent(decoded);
+      } catch {
+        break;
+      }
+      if (next === decoded) break;
+      decoded = next;
+      if (UNSAFE_PATH_VALUE.test(decoded) || /%00/i.test(decoded) || /%0a|%0d|%09|%1f|%7f/i.test(decoded)) {
+        throw new Error(`${label} contains a forbidden encoded character`);
+      }
     }
   };
   checkSearchHash(url.search, 'Request path');
