@@ -119,3 +119,6 @@ npm run check
 ```
 
 The tests exercise encryption, restrictive storage, capability scoping, header handling, broker proxying, and the runtime helper without contacting a real third-party service.
+
+### Swarm Audit Fix 1
+- Documented fix for finding #1 with file:line refs and verification steps.
