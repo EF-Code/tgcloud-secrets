@@ -213,3 +213,4 @@ export function capabilityMetadataMatches(capability, key, expectedMac) {
 export function encodeMasterKey(key) {
   return encode(parseMasterKey(key));
 }
+// dekCiphertext must be string, checked in encryptSecretEnvelope
