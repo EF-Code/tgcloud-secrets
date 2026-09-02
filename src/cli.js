@@ -60,6 +60,7 @@ function parseArgs(args) {
   const options = Object.create(null);
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
+    if (arg === '--__proto__' || arg === '--constructor' || arg === '--prototype' || arg.startsWith('--__proto__=') || arg.startsWith('--constructor=') || arg.startsWith('--prototype=')) throw new Error(`Option ${arg} is reserved`);
     if (!arg.startsWith('--')) {
       positional.push(arg);
       continue;
