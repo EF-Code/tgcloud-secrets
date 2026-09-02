@@ -71,3 +71,10 @@ test('11 - isPrivateIpv4 6to4 relay 192.88.99.1', () => {
   assert.equal(isPrivateHost('192.88.99.1'), true);
 });
 
+
+test('12 - ::ffff: mapped public vs private', () => {
+  assert.equal(isPrivateHost('::ffff:8.8.8.8'), false);
+  assert.equal(isPrivateHost('::ffff:10.0.0.1'), true);
+  assert.equal(isPrivateHost('::ffff:192.0.2.1'), true);
+});
+
