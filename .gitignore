@@ -5,3 +5,6 @@ coverage/
 .env.*
 !.env.example
 *.log
+CHANGES_DETAILED.md
+docs/CHANGES_DETAILED.md
+DETAILED_CHANGES.md
