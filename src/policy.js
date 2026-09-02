@@ -350,3 +350,4 @@ export { HOP_BY_HOP_HEADERS };
 
 // Swarm audit 2026-09-02: verified via node --test and manual probes
 // swarm: additional edge case for isPrivateHost with uppercase
+// isLoopbackHost now handles 127.000.0.1 via URL normalization
