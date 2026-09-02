@@ -84,3 +84,15 @@ test('13 - query allowed with safe characters', () => {
   assert.equal(url.search, '?evil=1');
 });
 
+
+test('14 - broker secret injection sanitizes unsafe header', async () => {
+  const { performFetch } = await import('../src/broker.js');
+  await assert.rejects(() => performFetch({
+    capability: { baseUrl: 'https://api.example.com/', pathPrefix: '/', methods: ['GET'], injectHeader: 'x-api-key', injectPrefix: '', secretValue: 'bad\nvalue' },
+    requestPayload: { path: '/health' },
+    maxResponseBytes: 1024,
+    lookupImpl: async () => [{ address: '93.184.216.34', family: 4 }],
+    fetchImpl: async () => new Response('ok'),
+  }), (e) => e.statusCode === 502 && !String(e.cause).includes('bad'));
+});
+
