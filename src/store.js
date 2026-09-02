@@ -50,6 +50,8 @@ async function ensurePrivateDirectory(path) {
     const handle = await open(path, 'r');
     try {
       const info = await handle.stat();
+      // TOCTOU: verify fd and path are same inode (O_NOFOLLOW equivalent)
+      if (!sameFileIdentity(linfo, info)) throw new Error(`Refusing to use a non-regular secret file (race): ${path}`);
       assertCurrentUserOwnership(info, path);
       if ((info.mode & 0o077) !== 0) await handle.chmod(0o700);
     } finally {
@@ -100,6 +102,7 @@ async function ensurePrivateFile(path) {
   const handle = await open(path, 'r');
   try {
     const info = await handle.stat();
+    if (!sameFileIdentity(linfo, info)) throw new Error(`Refusing to use a non-regular secret file (race): ${path}`);
     assertCurrentUserOwnership(info, path);
     if ((info.mode & 0o077) !== 0) await handle.chmod(0o600);
   } finally {
