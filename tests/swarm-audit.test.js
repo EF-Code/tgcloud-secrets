@@ -96,3 +96,20 @@ test('14 - broker secret injection sanitizes unsafe header', async () => {
   }), (e) => e.statusCode === 502 && !String(e.cause).includes('bad'));
 });
 
+
+test('15 - broker invalid limiter does not block valid token', async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'tg-swarm-'));
+  const store = new SecretStore({ dataDir });
+  await store.init();
+  await store.setSecret('demo', 'secret-value');
+  const cap = await store.createCapability({ secretName: 'demo', baseUrl: 'https://api.example.com', pathPrefix: '/', methods: ['GET'] });
+  const broker = createBrokerServer({ store, host: '127.0.0.1', port: 0, maxInvalidAttemptsPerMinute: 1, lookupImpl: async () => [{ address: '93.184.216.34', family: 4 }], fetchImpl: async () => new Response('ok'), logger: { info() {}, error() {}, warn() {} } });
+  const addr = await broker.listen();
+  const ep = 'http://127.0.0.1:' + addr.port + '/v1/fetch';
+  await fetch(ep, { method: 'POST', headers: { 'x-tgcloud-capability': 'tgscap_invalid1_invalid1_invalid1_', 'content-type': 'application/json' }, body: JSON.stringify({ path: '/health' }) });
+  await fetch(ep, { method: 'POST', headers: { 'x-tgcloud-capability': 'tgscap_invalid2_invalid2_invalid2_', 'content-type': 'application/json' }, body: JSON.stringify({ path: '/health' }) });
+  const good = await fetch(ep, { method: 'POST', headers: { 'x-tgcloud-capability': cap.token, 'content-type': 'application/json' }, body: JSON.stringify({ path: '/health' }) });
+  assert.notEqual(good.status, 429, 'valid token must not be throttled by invalid limiter');
+  await broker.close();
+});
+
