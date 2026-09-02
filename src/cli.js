@@ -57,7 +57,7 @@ Examples:
 
 function parseArgs(args) {
   const positional = [];
-  const options = {};
+  const options = Object.create(null);
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
     if (!arg.startsWith('--')) {
