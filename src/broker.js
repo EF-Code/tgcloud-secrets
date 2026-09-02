@@ -470,6 +470,33 @@ export function createBrokerServer({
         } else jsonResponse(response, 200, { ok: true });
         return;
       }
+      if (request.method === 'GET' && healthPath === '/readyz') {
+        try {
+          if (typeof store.healthCheck === 'function') await store.healthCheck();
+          else if (typeof store._readStore === 'function') await store._readStore().catch(() => { throw new Error('store not ready'); });
+          jsonResponse(response, 200, { ok: true, store: store.constructor.name, inFlight: totalInFlight });
+        } catch (e) {
+          jsonResponse(response, 503, { ok: false, error: 'not_ready' });
+        }
+        return;
+      }
+      if (request.method === 'GET' && healthPath === '/metrics') {
+        const lines = [
+          '# HELP tgcloud_proxy_requests_in_flight Current in-flight proxy requests',
+          '# TYPE tgcloud_proxy_requests_in_flight gauge',
+          `tgcloud_proxy_requests_in_flight ${totalInFlight}`,
+          '# HELP tgcloud_proxy_capability_in_flight Per-capability in-flight',
+          '# TYPE tgcloud_proxy_capability_in_flight gauge',
+          ...Array.from(inFlight.entries()).map(([capId, count]) => `tgcloud_proxy_capability_in_flight{capability_id="${capId}"} ${count}`),
+          '# HELP tgcloud_proxy_max_concurrent_requests_per_capability Max per capability',
+          '# TYPE tgcloud_proxy_max_concurrent_requests_per_capability gauge',
+          `tgcloud_proxy_max_concurrent_requests_per_capability ${maxConcurrentRequestsPerCapability}`,
+        ];
+        const body = Buffer.from(lines.join('\n') + '\n');
+        response.writeHead(200, { 'content-type': 'text/plain; version=0.0.4', 'content-length': body.length, 'cache-control': 'no-store' });
+        response.end(body);
+        return;
+      }
       if (request.method !== 'POST' || request.url !== '/v1/fetch') {
         closeResponse(response, request, 404, { error: 'not_found' });
         return;

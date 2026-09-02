@@ -7,11 +7,12 @@ import {
   timingSafeEqual,
 } from 'node:crypto';
 
-const ALGORITHM = 'aes-256-gcm';
-const ENCRYPTED_SECRET_VERSION = 2;
-const KEY_BYTES = 32;
-const IV_BYTES = 12;
-const MAX_ENCRYPTED_SECRET_BYTES = 16 * 1024;
+export const ALGORITHM = 'aes-256-gcm';
+export const ENCRYPTED_SECRET_VERSION = 2;
+export const ENCRYPTED_SECRET_VERSION_V3 = 3;
+export const KEY_BYTES = 32;
+export const IV_BYTES = 12;
+export const MAX_ENCRYPTED_SECRET_BYTES = 16 * 1024;
 
 function encode(bytes) {
   return Buffer.from(bytes).toString('base64url');
@@ -26,6 +27,19 @@ function secretAssociatedData(secretName) {
     throw new Error('Secret name is required to encrypt or decrypt a secret');
   }
   return Buffer.from(`tgcloud-secrets/secret/${secretName}`, 'utf8');
+}
+
+function secretAssociatedDataV3(secretName, orgId, projectId) {
+  if (typeof secretName !== 'string' || secretName.length === 0) {
+    throw new Error('Secret name is required to encrypt or decrypt a secret');
+  }
+  const org = orgId ? String(orgId) : 'default';
+  const proj = projectId ? String(projectId) : 'default';
+  return Buffer.from(`tgcloud-secrets/v3/${org}/${proj}/${secretName}`, 'utf8');
+}
+
+function dekAssociatedData(keyId) {
+  return Buffer.from(`tgcloud-secrets/dek/${keyId}`, 'utf8');
 }
 
 export function generateMasterKey() {
@@ -95,6 +109,68 @@ export function decryptSecret(record, key, secretName) {
   }
 }
 
+export function generateDEK() {
+  return randomBytes(KEY_BYTES);
+}
+
+export function encryptSecretWithDEK(value, dek, secretName, orgId, projectId) {
+  const plaintext = Buffer.from(String(value), 'utf8');
+  const iv = randomBytes(IV_BYTES);
+  const cipher = createCipheriv(ALGORITHM, parseMasterKey(dek), iv);
+  cipher.setAAD(secretAssociatedDataV3(secretName, orgId, projectId));
+  const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+  return {
+    iv: encode(iv),
+    tag: encode(cipher.getAuthTag()),
+    ciphertext: encode(ciphertext),
+  };
+}
+
+export function decryptSecretWithDEK(record, dek, secretName, orgId, projectId) {
+  if (!record || record.version !== ENCRYPTED_SECRET_VERSION_V3 || record.algorithm !== ALGORITHM) {
+    throw new Error('Unsupported encrypted secret record');
+  }
+  if (typeof record.iv !== 'string' || typeof record.tag !== 'string' || typeof record.ciphertext !== 'string') {
+    throw new Error('Unsupported encrypted secret record');
+  }
+  const iv = decode(record.iv);
+  const tag = decode(record.tag);
+  const ciphertext = decode(record.ciphertext);
+  if (iv.length !== IV_BYTES || tag.length !== 16 || ciphertext.length > MAX_ENCRYPTED_SECRET_BYTES) {
+    throw new Error('Unsupported encrypted secret record');
+  }
+  const decipher = createDecipheriv(ALGORITHM, parseMasterKey(dek), iv);
+  decipher.setAAD(secretAssociatedDataV3(secretName, orgId, projectId));
+  decipher.setAuthTag(tag);
+  try {
+    const plaintext = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+    return plaintext.toString('utf8');
+  } catch {
+    throw new Error('Unsupported encrypted secret record');
+  }
+}
+
+export function encryptSecretEnvelope(value, dek, secretName, { orgId, projectId, keyId, dekCiphertext } = {}) {
+  const enc = encryptSecretWithDEK(value, dek, secretName, orgId, projectId);
+  return {
+    version: ENCRYPTED_SECRET_VERSION_V3,
+    algorithm: ALGORITHM,
+    keyId: String(keyId || 'local'),
+    iv: enc.iv,
+    tag: enc.tag,
+    ciphertext: enc.ciphertext,
+    dekCiphertext: String(dekCiphertext),
+  };
+}
+
+export function decryptSecretEnvelope(record, dek, secretName, orgId, projectId) {
+  return decryptSecretWithDEK(record, dek, secretName, orgId, projectId);
+}
+
+export function isV3Record(record) {
+  return record && record.version === ENCRYPTED_SECRET_VERSION_V3;
+}
+
 export function hashCapability(token) {
   return createHash('sha256').update(String(token), 'utf8').digest('hex');
 }
@@ -117,6 +193,10 @@ function capabilityMetadata(capability) {
     injectHeader: capability.injectHeader,
     injectPrefix: capability.injectPrefix,
     allowHttp: capability.allowHttp,
+    orgId: capability.orgId || 'default',
+    projectId: capability.projectId || 'default',
+    keyId: capability.keyId || 'local',
+    expiresAt: capability.expiresAt || null,
   });
 }
 

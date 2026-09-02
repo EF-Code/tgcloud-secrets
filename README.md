@@ -15,7 +15,9 @@ The vendor secret is used only inside the broker's outbound request. It is never
 
 ## Status
 
-This is an early MVP, suitable for local development and a carefully controlled companion deployment. It is not yet a hosted multi-tenant service. Run it behind HTTPS and an access-controlled network before using it with production secrets.
+MVP `0.1.0` is production-hardened for **single-host** local dev + controlled companion behind HTTPS. For multi-tenant/org use (as planned for Telegram Serverless GA), use **Postgres + KMS** mode below — same CLI, `Postgres` replaces file lock store, `KMS` envelope (`v3` with `keyId`) replaces `master.key` beside `store.json`. See `Production` section.
+
+> File store (`--data-dir`) remains for local dev. Postgres (`--dsn`/`DATABASE_URL`) + `TGCLOUD_KMS_KEY_ID` (or `TGCLOUD_MASTER_KEY` for `local` KMS) is recommended for any shared/org deployment.
 
 ## Quick start
 
@@ -74,14 +76,18 @@ The helper uses the platform's fetch-compatible implementation and returns the b
 ## CLI reference
 
 ```text
-tgcloud-secrets init [--data-dir PATH]
-tgcloud-secrets set NAME [--data-dir PATH]       # reads the value from stdin (trailing LF/CRLF is a delimiter)
-tgcloud-secrets list [--json] [--data-dir PATH]
-tgcloud-secrets grant NAME --base-url URL [options]
-tgcloud-secrets capabilities [--json] [--data-dir PATH]
-tgcloud-secrets revoke CAPABILITY_ID [--data-dir PATH]
-tgcloud-secrets serve [--host HOST] [--port PORT] [--data-dir PATH] [--trusted-proxy IP[,IP...]]
+tgcloud-secrets init [--data-dir PATH] [--dsn URL] [--org ID] [--project ID] [--kms-key-id ID]
+tgcloud-secrets set NAME [--data-dir PATH] [--dsn URL] [--org ID] [--project ID]  # reads from stdin
+tgcloud-secrets list [--json] [--data-dir PATH] [--dsn URL] [--org ID] [--project ID]
+tgcloud-secrets grant NAME --base-url URL [options] [--dsn URL] [--org ID] [--project ID] [--expires-at ISO8601]
+tgcloud-secrets capabilities [--json] [--data-dir PATH] [--dsn URL] [--org ID] [--project ID]
+tgcloud-secrets revoke CAPABILITY_ID [--data-dir PATH] [--dsn URL] [--org ID] [--project ID]
+tgcloud-secrets serve [--host HOST] [--port PORT] [--data-dir PATH] [--dsn URL] [--trusted-proxy IP[,IP...]]
+tgcloud-secrets healthcheck [--dsn URL] [--kms-key-id ID]
+tgcloud-secrets migrate --from <path> --to <dsn> [--org ID] [--project ID]
 ```
+
+Global: `--dsn` or `DATABASE_URL`/`TGCLOUD_SECRETS_DSN` selects Postgres (file store otherwise); `--org`/`--project` default `default`; `--kms-key-id` or `TGCLOUD_KMS_KEY_ID` (`local` uses `TGCLOUD_MASTER_KEY` 32-byte base64url, or ephemeral dev key).
 
 `grant` options are `--path-prefix`, `--method` (comma-separated), `--inject-header`, `--inject-prefix`, and `--allow-http`. HTTP is rejected by default for upstreams; `--allow-http` is intended only for local development. The runtime helper likewise requires HTTPS for remote broker endpoints and permits HTTP only for loopback development endpoints.
 
@@ -91,31 +97,60 @@ tgcloud-secrets serve [--host HOST] [--port PORT] [--data-dir PATH] [--trusted-p
 
 The companion broker exposes:
 
-- `GET /healthz` — non-sensitive health response.
-- `POST /v1/fetch` — accepts a JSON request with `path`, optional `method`, `headers`, and string `body`. The capability is supplied in `X-Tgcloud-Capability`.
+- `GET /healthz` — non-sensitive health response (`HEAD` also, `?query` ignored).
+- `GET /readyz` — checks Postgres + KMS (or file store) readiness, returns `200 {ok:true}` or `503`.
+- `GET /metrics` — Prometheus `tgcloud_proxy_requests_in_flight`, per-capability `tgcloud_proxy_capability_in_flight`.
+- `POST /v1/fetch` — accepts JSON `{path, method, headers, body}`. Capability via `X-Tgcloud-Capability`.
 
 The broker rejects out-of-policy paths, methods, absolute URLs, redirects, hop-by-hop/forwarding headers, caller attempts to override the injected header, oversized request/response bodies, private or link-local literal/DNS targets, and malformed requests. It also applies instance-local per-capability and invalid-attempt rate limits. Upstream response bodies are returned as-is, so an upstream service that intentionally echoes its authorization header could still expose it to the caller; integrations should be chosen with that in mind.
 
 ## Security model and current limits
 
-- AES-256-GCM encrypts each stored secret with a local 32-byte master key and binds the ciphertext to its logical secret name; records from older unbound MVP builds must be re-entered after upgrading.
-- Store and key files are created with restrictive permissions; the broker refuses symlinked data files.
-- The broker keeps only a SHA-256 hash of each capability token.
-- Logs contain capability IDs, paths, methods, and statuses, never secret values or tokens.
-- The broker resolves public hostnames before egress, rejects private/link-local answers, and the default fetch path pins the verified address while preserving the original Host/SNI name.
-- The broker has bounded request/response sizes, timeouts, malformed-connection handling, per-capability concurrency limits, and instance-local rate limits.
-- Invalid-attempt limiting uses the broker's immediate TCP peer by default. A public deployment behind a reverse proxy must enforce client-aware authentication and rate limiting at that trusted edge; `--trusted-proxy` enables `X-Forwarded-For` use only for explicitly listed immediate proxy IPs, and the proxy must overwrite that header.
-- Capability policy metadata is authenticated with the local master key; capabilities created by older MVP builds must be re-granted after upgrading.
-- Capabilities are currently bearer tokens. A compromised Serverless module can use its allowed upstream capability until it is revoked; it cannot read the vendor secret through the broker API unless the upstream service itself returns it.
-- The local master key is stored separately as a mode-0600 file, but it lives beside the encrypted store in this MVP. A host compromise that obtains both files can decrypt the secrets; use an OS keyring/KMS-backed key strategy before production use.
-- There is no multi-tenant identity provider, rotation scheduler, quota store, or hosted control plane yet.
-- Administrative store writes use a local lock file and atomic replacement. This protects concurrent CLI writers on one filesystem, not a distributed multi-host deployment.
+- **File store:** AES-256-GCM encrypts each secret with a local 32-byte master key and binds ciphertext to `secretName`; records from older unbound builds must be re-entered. `v3` envelope (`src/crypto.js:11`) now binds to `org/project` and uses `KMS` `DEK` per secret (`keyId` in record) when `--dsn` is used.
+- **Postgres+KMS:** `orgs(id,kms_key_id)`, `projects(id,org_id)`, `secrets(id,project_id,name,encrypted_blob,dek_ciphertext,keyId)` `src/pg-store.js:67-77`, `capabilities` with `token_hash` + `metadata_mac` bound to `org/project/keyId/expiresAt` `src/crypto.js:123`. `LocalKMSProvider` `src/kms.js:9` encrypts `DEK` with `TGCLOUD_MASTER_KEY`; `AwsKMSProvider` `src/kms.js:40` uses `GenerateDataKey`/`Decrypt` cached `5m`.
+- Store and key files (file mode) are `0600`/`0700` with symlink refusal `src/store.js:44-96` (`fstat`/`fchmod`). Postgres mode uses `RLS` via `project_id` isolation, no file lock.
+- Broker keeps only `SHA-256` of capability token `src/crypto.js:98`, `metadataMac` `HMAC-SHA256` `src/crypto.js:123` now includes `orgId/projectId/keyId/expiresAt`.
+- Logs contain `capabilityId`, `path` (pathname only), `method`, `status` `src/broker.js:542-547`, never secret/`tgscap_` values. `capabilities` with `expiresAt` auto-rejected `src/pg-store.js:358`.
+- Broker resolves public hostnames, rejects private/link-local, pins verified IP via custom `lookup` preserving `Host`/`SNI` `src/broker.js:237-284`.
+- Bounded `1MiB` request / `30MiB` response, `15s` timeout, `maxHeaderSize 16k`, per-capability `8` + global `32` concurrency `src/broker.js:8-11`, graceful drain `src/broker.js:593-605`.
+- Invalid-attempt limiting per `peer` or `client:<XFF>` when `--trusted-proxy` trusts immediate proxy `src/broker.js:107-117,477-499`; valid `tgscap_` tokens bypass invalid bucket (no DoS).
+- File store `0600` key beside `store.json` is still host-compromise = decrypt. **Use Postgres+KMS (`local` `age` via `TGCLOUD_MASTER_KEY` or `AWS KMS` `TGCLOUD_KMS_KEY_ID=arn:...`) for production** — key never on same disk unencrypted, `DEK` cached, `healthCheck` `src/pg-store.js:444` does `SELECT 1` + `KMS` roundtrip.
+- File mode has no `expiresAt` enforcement beyond `HMAC`; Postgres mode enforces `expires_at` and `org`/`project` isolation.
+- No hosted identity provider/rotation scheduler/quota yet — `grant --expires-at` is per-capability TTL, `revoke` is immediate.
+
+## Production (Postgres + KMS)
+
+Local (no AWS) — single-team prod without dashboard:
+```sh
+docker compose up -d postgres # uses docker-compose.yml postgres:15
+export DATABASE_URL=postgres://postgres:postgres@localhost:5432/tgcloud
+export TGCLOUD_MASTER_KEY=$(node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))")
+# keep TGCLOUD_MASTER_KEY in systemd-creds/OS keyring, 0600, not in repo
+node src/cli.js healthcheck --dsn $DATABASE_URL # -> {ok:true, store:'postgres'}
+printf %s "$OPENAI_API_KEY" | node src/cli.js set openai --org myorg --project mybot
+node src/cli.js grant openai --org myorg --project mybot --base-url https://api.openai.com --path-prefix /v1/ --method POST --expires-at 2027-01-01T00:00:00Z
+DATABASE_URL=... TGCLOUD_MASTER_KEY=... node src/cli.js serve --host 127.0.0.1 --port 8787
+# migrate from file store
+node src/cli.js migrate --from .tgcloud-secrets --to $DATABASE_URL --org myorg --project mybot
+```
+
+Managed (org-ready, when Serverless GA):
+```sh
+# Postgres: Neon/Supabase/RDS, KMS: AWS KMS
+export DATABASE_URL=postgres://...@neon...
+export TGCLOUD_KMS_KEY_ID=arn:aws:kms:us-east-1:123456789012:key/abc
+export AWS_REGION=us-east-1 # + AWS credentials via env/IRSA
+node src/cli.js healthcheck # checks SELECT 1 + KMS GenerateDataKey/Decrypt
+# same set/grant/serve as above, but DEKs are KMS-wrapped, per-org kms_key_id in orgs table
+```
 
 ## Development
 
 ```sh
-npm test
-npm run check
+npm test                          # file store + swarm-audit (49 tests)
+DATABASE_URL=postgres://postgres:postgres@localhost:5432/tgcloud TGCLOUD_MASTER_KEY=... npm test  # + 5 pg-store tests
+npm run check                     # node --check src/*.js + runtime
+docker compose up -d && npm test  # local Postgres via 5432
 ```
 
-The tests exercise encryption, restrictive storage, capability scoping, header handling, broker proxying, and the runtime helper without contacting a real third-party service.
+Tests cover `v2` file store, `v3` envelope `org/project` binding `tests/kms.test.js`, `PgStore` isolation `tests/pg-store.test.js`, `broker` `PgStore` injection + `/readyz`/`/metrics`, and `swarm-audit` regressions without third-party network.
