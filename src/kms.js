@@ -136,3 +136,5 @@ export function createKMSProvider({ kmsKeyId, masterKey, kmsClient } = {}) {
 export function isKMSAvailable() {
   return Boolean(process.env.TGCLOUD_KMS_KEY_ID || process.env.AWS_KMS_KEY_ID || process.env.TGCLOUD_MASTER_KEY);
 }
+
+// Clear cache (for tests and rotation)
