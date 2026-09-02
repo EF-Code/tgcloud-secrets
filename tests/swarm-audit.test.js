@@ -113,3 +113,15 @@ test('15 - broker invalid limiter does not block valid token', async () => {
   await broker.close();
 });
 
+
+test('16 - broker healthz HEAD with query', async () => {
+  const store = new SecretStore({ dataDir: await mkdtemp(join(tmpdir(), 'tg-swarm-')) });
+  await store.init();
+  const broker = createBrokerServer({ store, host: '127.0.0.1', port: 0, logger: { info() {}, error() {}, warn() {} } });
+  const addr = await broker.listen();
+  const base = 'http://127.0.0.1:' + addr.port;
+  assert.equal((await fetch(base + '/healthz?foo=bar')).status, 200);
+  assert.equal((await fetch(base + '/healthz?foo=bar', { method: 'HEAD' })).status, 200);
+  await broker.close();
+});
+
