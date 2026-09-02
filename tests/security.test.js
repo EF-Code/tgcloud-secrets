@@ -7,7 +7,7 @@ import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-// Swarm audit regression tests - neuromancer/wintermute findings 2026-09-02
+// Security regression tests
 
 test('1 - isPrivateHost strips zone identifier %lo0', () => {
   assert.equal(isPrivateHost('fe80::1%lo0'), true);
@@ -98,7 +98,7 @@ test('14 - broker secret injection sanitizes unsafe header', async () => {
 
 
 test('15 - broker invalid limiter does not block valid token', async () => {
-  const dataDir = await mkdtemp(join(tmpdir(), 'tg-swarm-'));
+  const dataDir = await mkdtemp(join(tmpdir(), 'tg-test-'));
   const store = new SecretStore({ dataDir });
   await store.init();
   await store.setSecret('demo', 'secret-value');
@@ -115,7 +115,7 @@ test('15 - broker invalid limiter does not block valid token', async () => {
 
 
 test('16 - broker healthz HEAD with query', async () => {
-  const store = new SecretStore({ dataDir: await mkdtemp(join(tmpdir(), 'tg-swarm-')) });
+  const store = new SecretStore({ dataDir: await mkdtemp(join(tmpdir(), 'tg-test-')) });
   await store.init();
   const broker = createBrokerServer({ store, host: '127.0.0.1', port: 0, logger: { info() {}, error() {}, warn() {} } });
   const addr = await broker.listen();
@@ -127,7 +127,7 @@ test('16 - broker healthz HEAD with query', async () => {
 
 
 test('17 - broker graceful drain awaits inFlight', async () => {
-  const dataDir = await mkdtemp(join(tmpdir(), 'tg-swarm-'));
+  const dataDir = await mkdtemp(join(tmpdir(), 'tg-test-'));
   const store = new SecretStore({ dataDir });
   await store.init();
   await store.setSecret('demo', 'secret-value');
@@ -146,7 +146,7 @@ test('17 - broker graceful drain awaits inFlight', async () => {
 
 
 test('18 - store reserves constructor/prototype', async () => {
-  const dataDir = await mkdtemp(join(tmpdir(), 'tg-swarm-'));
+  const dataDir = await mkdtemp(join(tmpdir(), 'tg-test-'));
   const store = new SecretStore({ dataDir });
   await store.init();
   await assert.rejects(() => store.setSecret('constructor', 'val'), /reserved/);
@@ -156,7 +156,7 @@ test('18 - store reserves constructor/prototype', async () => {
 
 test('19 - store fchmod auto-fixes 0644 to 0600', async () => {
   const { chmod, stat } = await import('node:fs/promises');
-  const dataDir = await mkdtemp(join(tmpdir(), 'tg-swarm-'));
+  const dataDir = await mkdtemp(join(tmpdir(), 'tg-test-'));
   const store = new SecretStore({ dataDir });
   await store.init();
   const keyPath = join(dataDir, 'master.key');

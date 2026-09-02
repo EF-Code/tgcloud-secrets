@@ -147,10 +147,10 @@ node src/cli.js healthcheck # checks SELECT 1 + KMS GenerateDataKey/Decrypt
 ## Development
 
 ```sh
-npm test                          # file store + swarm-audit (49 tests)
+npm test                          # file store (49 tests)
 DATABASE_URL=postgres://postgres:postgres@localhost:5432/tgcloud TGCLOUD_MASTER_KEY=... npm test  # + 5 pg-store tests
 npm run check                     # node --check src/*.js + runtime
 docker compose up -d && npm test  # local Postgres via 5432
 ```
 
-Tests cover `v2` file store, `v3` envelope `org/project` binding `tests/kms.test.js`, `PgStore` isolation `tests/pg-store.test.js`, `broker` `PgStore` injection + `/readyz`/`/metrics`, and `swarm-audit` regressions without third-party network.
+Tests cover `v2` file store, `v3` envelope `org/project` binding `tests/kms.test.js`, `PgStore` isolation `tests/pg-store.test.js`, `broker` `PgStore` injection + `/readyz`/`/metrics`, and security regressions without third-party network.
