@@ -5,6 +5,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { MAX_SECRET_BYTES } from '../src/store.js';
+import pg from 'pg';
+
+const { Pool } = pg;
+const testDsn = process.env.DATABASE_URL || process.env.TGCLOUD_SECRETS_DSN || 'postgres://postgres:postgres@localhost:5433/tgcloud';
 
 function runCli(args, input) {
   return new Promise((resolve, reject) => {
@@ -39,6 +43,33 @@ test('CLI accepts newline-terminated piped secrets', async () => {
 });
 
 test('CLI DATABASE_URL vs --data-dir precedence', async () => {
-  // This is a placeholder for manual test: DATABASE_URL should be ignored when --data-dir explicit
-  assert.ok(true);
+  const dataDir = await mkdtemp(join(tmpdir(), 'tgcloud-secrets-cli-precedence-'));
+  const previous = process.env.DATABASE_URL;
+  process.env.DATABASE_URL = 'postgres://invalid:invalid@127.0.0.1:1/unreachable';
+  try {
+    const result = await runCli(['set', 'demo', '--data-dir', dataDir, '--json'], 'file-secret\n');
+    assert.equal(result.code, 0, result.stderr);
+    assert.doesNotMatch(result.stderr, /ignored/);
+  } finally {
+    if (previous === undefined) delete process.env.DATABASE_URL;
+    else process.env.DATABASE_URL = previous;
+  }
+});
+
+test('CLI migrate --dry-run does not initialize tenant rows', async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'tgcloud-secrets-cli-dry-run-'));
+  const seeded = await runCli(['set', 'demo', '--data-dir', dataDir, '--json'], 'file-secret\n');
+  assert.equal(seeded.code, 0, seeded.stderr);
+  const suffix = `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+  const orgId = `dryorg_${suffix}`;
+  const projectId = `dryproj_${suffix}`;
+  const result = await runCli(['migrate', '--from', dataDir, '--to', testDsn, '--org', orgId, '--project', projectId, '--dry-run']);
+  assert.equal(result.code, 0, result.stderr);
+  const pool = new Pool({ connectionString: testDsn, ssl: false });
+  try {
+    const rows = await pool.query('SELECT 1 FROM orgs WHERE id=$1', [orgId]);
+    assert.equal(rows.rowCount, 0);
+  } finally {
+    await pool.end();
+  }
 });

@@ -61,14 +61,14 @@ test('AwsKMSProvider caches decrypt', async () => {
   await kms.decrypt(ct);
   await kms.decrypt(ct);
   assert.equal(decryptCalls, 1, 'second decrypt should be cached');
+  const cached = kms.cache.get(ct).dek;
+  kms.clearCache();
+  assert.equal(kms.cache.size, 0);
+  assert.ok(cached.every((byte) => byte === 0));
 });
 
 test('LocalKMSProvider invalid ciphertext rejected', async () => {
   const kms = new LocalKMSProvider({ masterKey: generateMasterKey(), keyId: 'local' });
   await assert.rejects(() => kms.decrypt('invalid'), /Invalid|cannot decrypt|keyId mismatch/);
   await assert.rejects(() => kms.decrypt('a.b.c'), /Invalid/);
-});
-
-test('AwsKMS without HMAC should fail on createCapability', async () => {
-  assert.ok(true); // placeholder, real test needs TGCLOUD_HMAC_KEY
 });

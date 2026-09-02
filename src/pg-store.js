@@ -20,7 +20,6 @@ import {
   normalizePathPrefix,
   isSafeHeaderValue,
   isLoopbackHost,
-  isPrivateHost,
 } from './policy.js';
 
 const { Pool } = pg;
@@ -149,7 +148,7 @@ CREATE INDEX IF NOT EXISTS idx_audit_capability_time ON capability_audit(capabil
 `;
 
 export class PgStore {
-  constructor({ dsn, kmsProvider, masterKey, orgId = 'default', projectId = 'default', poolConfig = {} } = {}) {
+  constructor({ dsn, kmsProvider, kmsKeyId, masterKey, orgId = 'default', projectId = 'default', poolConfig = {} } = {}) {
     const connectionString = dsn || process.env.DATABASE_URL || process.env.TGCLOUD_SECRETS_DSN;
     if (!connectionString) throw new Error('Postgres DSN required (set DATABASE_URL or TGCLOUD_SECRETS_DSN)');
     validateOrgProjectId(orgId, 'orgId');
@@ -161,7 +160,7 @@ export class PgStore {
     this.globalProjectId = `${orgId}:${projectId}`;
     let hostname = 'localhost';
     try { hostname = new URL(connectionString).hostname; } catch {}
-    const isLocalHost = isLoopbackHost(hostname) || isPrivateHost(hostname) || hostname === 'localhost';
+    const isLocalHost = isLoopbackHost(hostname);
     this.pool = new Pool({
       connectionString,
       ssl: isLocalHost ? false : { rejectUnauthorized: true },
@@ -182,6 +181,7 @@ export class PgStore {
     } else {
       this.kms = null;
       this._pendingMasterKey = masterKey;
+      this._pendingKmsKeyId = kmsKeyId;
     }
     this._initPromise = null;
   }
@@ -220,7 +220,7 @@ export class PgStore {
     if (this.kms) return this.kms;
     const { createKMSProvider } = await import('./kms.js');
     try {
-      this.kms = createKMSProvider({ masterKey: this._pendingMasterKey });
+      this.kms = createKMSProvider({ kmsKeyId: this._pendingKmsKeyId, masterKey: this._pendingMasterKey });
     } catch (e) {
       if (String(e.message).includes('Local KMS requires')) {
         // For Postgres production, ephemeral is data loss — fail fast unless explicitly allowed
@@ -239,6 +239,8 @@ export class PgStore {
 
   async setSecret(name, value, { orgId = this.orgId, projectId = this.projectId } = {}) {
     validateSecretName(name);
+    validateOrgProjectId(orgId, 'orgId');
+    validateOrgProjectId(projectId, 'projectId');
     if (typeof value !== 'string' || value.length === 0) throw new Error('Secret value must be a non-empty string');
     if (Buffer.byteLength(value, 'utf8') > MAX_SECRET_BYTES) throw new Error(`Secret value must be at most ${MAX_SECRET_BYTES} bytes`);
     if (!isSafeHeaderValue(value)) throw new Error('Secret value must be an HTTP-safe string without unsafe control characters');
@@ -271,6 +273,8 @@ export class PgStore {
 
   async getSecret(name, { orgId = this.orgId, projectId = this.projectId } = {}) {
     validateSecretName(name);
+    validateOrgProjectId(orgId, 'orgId');
+    validateOrgProjectId(projectId, 'projectId');
     await this.init();
     const globalProjectId = `${orgId}:${projectId}`;
     const res = await this.pool.query(
@@ -293,6 +297,8 @@ export class PgStore {
   }
 
   async listSecrets({ orgId = this.orgId, projectId = this.projectId } = {}) {
+    validateOrgProjectId(orgId, 'orgId');
+    validateOrgProjectId(projectId, 'projectId');
     await this.init();
     const globalProjectId = `${orgId}:${projectId}`;
     const res = await this.pool.query(`SELECT name, updated_at FROM secrets WHERE project_id=$1 ORDER BY name`, [globalProjectId]);
@@ -312,6 +318,8 @@ export class PgStore {
     projectId = this.projectId,
   }) {
     validateSecretName(secretName);
+    validateOrgProjectId(orgId, 'orgId');
+    validateOrgProjectId(projectId, 'projectId');
     await this.init();
     const normalizedBaseUrl = normalizeBaseUrl(baseUrl, { allowHttp });
     const normalizedPathPrefix = normalizePathPrefix(pathPrefix);
@@ -384,6 +392,8 @@ export class PgStore {
   }
 
   async listCapabilities({ orgId = this.orgId, projectId = this.projectId } = {}) {
+    validateOrgProjectId(orgId, 'orgId');
+    validateOrgProjectId(projectId, 'projectId');
     await this.init();
     const globalProjectId = `${orgId}:${projectId}`;
     const res = await this.pool.query(
@@ -406,6 +416,8 @@ export class PgStore {
 
   async revokeCapability(id, { orgId = this.orgId, projectId = this.projectId } = {}) {
     validateCapabilityId(id);
+    validateOrgProjectId(orgId, 'orgId');
+    validateOrgProjectId(projectId, 'projectId');
     await this.init();
     const globalProjectId = `${orgId}:${projectId}`;
     const res = await this.pool.query(`DELETE FROM capabilities WHERE id=$1 AND org_id=$2 AND project_id=$3`, [id, orgId, globalProjectId]);

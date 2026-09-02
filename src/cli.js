@@ -70,7 +70,7 @@ function parseArgs(args) {
       options[withoutPrefix] = true;
       continue;
     }
-    if (withoutPrefix === 'allow-http' || withoutPrefix === 'allow-public' || withoutPrefix === 'json') {
+    if (withoutPrefix === 'allow-http' || withoutPrefix === 'allow-public' || withoutPrefix === 'json' || withoutPrefix === 'dry-run') {
       if (Object.hasOwn(options, withoutPrefix)) throw new Error(`Option --${withoutPrefix} was provided more than once`);
       options[withoutPrefix] = true;
       continue;
@@ -161,9 +161,6 @@ function createStore(options) {
   const projectId = projectOption(options);
   const kmsKeyId = kmsKeyIdOption(options);
   // Explicit --data-dir takes precedence over env DATABASE_URL to avoid surprise
-  if (hasExplicitDataDir && !hasExplicitDsn && dsn && process.env.DATABASE_URL) {
-    console.warn(`Warning: --data-dir ignored because DATABASE_URL is set (using Postgres). Unset DATABASE_URL or use --dsn to override.`);
-  }
   if (hasExplicitDataDir && !hasExplicitDsn) {
     return new SecretStore({ dataDir: dataDirOption(options) });
   }
@@ -175,7 +172,7 @@ function createStore(options) {
     } else if (kmsKeyId !== 'local') {
       kmsProvider = null;
     }
-    return new PgStore({ dsn, orgId, projectId, kmsProvider, masterKey: masterKeyEnv || undefined });
+    return new PgStore({ dsn, orgId, projectId, kmsProvider, kmsKeyId, masterKey: masterKeyEnv || undefined });
   }
   return new SecretStore({ dataDir: dataDirOption(options) });
 }
@@ -343,8 +340,8 @@ async function run(argv) {
     const isDryRun = options['dry-run'] === true || options['dry-run'] === 'true';
     const fileStore = new SecretStore({ dataDir: from });
     await fileStore.init();
-    const pgStore = isPgStore ? store : new PgStore({ dsn: to, orgId, projectId, kmsProvider: store.kms || null, masterKey: process.env.TGCLOUD_MASTER_KEY });
-    await pgStore.init();
+    const pgStore = isPgStore ? store : new PgStore({ dsn: to, orgId, projectId, kmsProvider: store.kms || null, kmsKeyId: kmsKeyIdOption(options), masterKey: process.env.TGCLOUD_MASTER_KEY });
+    if (!isDryRun) await pgStore.init();
     const secrets = await fileStore.listSecrets();
     let migrated = 0;
     let skipped = 0;

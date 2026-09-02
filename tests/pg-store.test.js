@@ -149,6 +149,34 @@ test('pg-store: orgId with colon should be rejected', () => {
   assert.throws(() => new PgStore({ dsn, orgId: 'a:b', projectId: 'c', kmsProvider: new LocalKMSProvider({ masterKey: generateMasterKey(), keyId: 'local' }) }), /must start|colon/);
 });
 
+test('pg-store: method-level tenant overrides are validated', async () => {
+  const { store } = await getTestStore();
+  try {
+    await assert.rejects(() => store.listSecrets({ orgId: 'a:b' }), /orgId/);
+    await assert.rejects(() => store.getSecret('valid', { projectId: 'a/b' }), /projectId/);
+  } finally {
+    await store.close().catch(() => {});
+  }
+});
+
+test('pg-store: enables TLS for private non-loopback database hosts', () => {
+  const kms = new LocalKMSProvider({ masterKey: generateMasterKey(), keyId: 'local' });
+  const privateStore = new PgStore({ dsn: 'postgres://user:pass@10.1.2.3:5432/db', kmsProvider: kms });
+  const localStore = new PgStore({ dsn: 'postgres://user:pass@127.0.0.1:5432/db', kmsProvider: kms });
+  assert.deepEqual(privateStore.pool.options.ssl, { rejectUnauthorized: true });
+  assert.equal(localStore.pool.options.ssl, false);
+});
+
+test('pg-store: honors an explicitly supplied AWS KMS key id', async () => {
+  const store = new PgStore({ dsn, kmsKeyId: 'arn:aws:kms:us-east-1:123456789012:key/example' });
+  try {
+    const kms = await store._getKMS();
+    assert.equal(kms.getKeyId(), 'arn:aws:kms:us-east-1:123456789012:key/example');
+  } finally {
+    await store.close().catch(() => {});
+  }
+});
+
 test('pg-store: revoke isolates org', async () => {
   const dsn = process.env.DATABASE_URL || 'postgres://postgres:postgres@localhost:5433/tgcloud';
   const mk = generateMasterKey();

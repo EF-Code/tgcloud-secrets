@@ -97,15 +97,15 @@ The broker rejects out-of-policy paths, methods, absolute URLs, redirects, hop-b
 
 ## Security model
 
-- **File store:** `AES-256-GCM` with a local 32-byte key, `AAD` bound to `secretName`. `v3` envelope `src/crypto.js:11` binds to `org/project` and uses a per-secret `DEK` (`keyId` in record) when `--dsn` is set. Re-enter secrets from older unbound builds.
-- **Postgres + KMS:** `orgs(id,kms_key_id)`, `projects(id,org_id)`, `secrets(id,project_id,name,encrypted_blob,dek_ciphertext,keyId)` `src/pg-store.js:67-77`, `capabilities(token_hash,metadata_mac)` bound to `org/project/keyId/expiresAt` `src/crypto.js:123`. `LocalKMSProvider` `src/kms.js:9` wraps `DEK` with `TGCLOUD_MASTER_KEY`; `AwsKMSProvider` `src/kms.js:40` uses `GenerateDataKey`/`Decrypt` cached 5 minutes.
+- **File store:** `AES-256-GCM` with a local 32-byte key, `AAD` bound to `secretName`. The `v3` Postgres envelope binds to `org/project` and uses a per-secret `DEK` (`keyId` in record). Re-enter secrets from older unbound builds.
+- **Postgres + KMS:** `orgs`, `projects`, `secrets`, and `capabilities` persist encrypted envelopes and metadata MACs bound to `org/project/keyId/expiresAt`. `LocalKMSProvider` wraps DEKs with `TGCLOUD_MASTER_KEY`; `AwsKMSProvider` uses `GenerateDataKey`/`Decrypt` with a bounded five-minute in-process cache.
 - File mode uses `0600`/`0700` and `fstat`/`fchmod` symlink checks `src/store.js:44-96`. Postgres mode isolates by `WHERE org_id/project_id` (no `RLS` yet).
 - The broker stores only the `SHA-256` hash `src/crypto.js:98` and `HMAC-SHA256` `src/crypto.js:123` now covering `orgId/projectId/keyId/expiresAt`.
 - Logs contain `capabilityId`, `path` (pathname only), `method`, `status` `src/broker.js:542-547`, never secrets or tokens. `expiresAt` is enforced `src/pg-store.js:358`.
 - Hostnames are resolved, private/link-local rejected, and the verified IP is pinned with `Host`/`SNI` preserved `src/broker.js:237-284`.
 - Limits: `1 MiB` request, `30 MiB` response, `15s` timeout, `16k` header, `8` per-capability and `32` global concurrency `src/broker.js:8-11`, graceful drain `src/broker.js:593-605`.
 - Rate limits are per `peer` or `client:<XFF>` when `--trusted-proxy` trusts the immediate proxy `src/broker.js:107-117,477-499`; valid `tgscap_` tokens bypass the invalid bucket.
-- File `master.key` beside `store.json` is host-compromise = decrypt. For production, use Postgres + KMS (`TGCLOUD_MASTER_KEY` for local `age` or `TGCLOUD_KMS_KEY_ID=arn:...` + `TGCLOUD_HMAC_KEY` 32-byte base64url for AWS). The `DEK` is cached 5 minutes `src/kms.js:9,64`; `healthCheck` does `SELECT 1` + KMS roundtrip `src/pg-store.js:444`.
+- File `master.key` beside `store.json` means host compromise can expose secrets. For production, use Postgres + KMS (`TGCLOUD_MASTER_KEY` for local AES-GCM key wrapping, or `TGCLOUD_KMS_KEY_ID=arn:...` plus a 32-byte base64url `TGCLOUD_HMAC_KEY` for AWS). AWS DEKs are cached for at most five minutes; `healthCheck` performs a database query and KMS roundtrip.
 - File mode has no `expiresAt` beyond `HMAC`; Postgres enforces `expires_at` and `org`/`project` isolation.
 - No hosted identity, rotation, or quota yet — `grant --expires-at` is a per-capability TTL, `revoke` is immediate.
 
@@ -147,4 +147,3 @@ docker compose up -d && npm test  # local Postgres
 ```
 
 Tests cover file store `v2`, envelope `v3` with `org/project` binding `tests/kms.test.js`, `PgStore` isolation `tests/pg-store.test.js`, broker injection with `PgStore` and `/readyz`/`/metrics`, and security regressions without network.
-

@@ -79,6 +79,26 @@ export class AwsKMSProvider {
     return this.keyId;
   }
 
+  _cacheSet(ciphertextBlob, dek) {
+    const existing = this.cache.get(ciphertextBlob);
+    if (existing) {
+      existing.dek.fill(0);
+      this.cache.delete(ciphertextBlob);
+    }
+    this.cache.set(ciphertextBlob, { dek: Buffer.from(dek), expiresAt: Date.now() + this.cacheTtlMs });
+    while (this.cache.size > 1000) {
+      const oldestKey = this.cache.keys().next().value;
+      const oldest = this.cache.get(oldestKey);
+      if (oldest) oldest.dek.fill(0);
+      this.cache.delete(oldestKey);
+    }
+  }
+
+  clearCache() {
+    for (const entry of this.cache.values()) entry.dek.fill(0);
+    this.cache.clear();
+  }
+
   async generateDataKey() {
     const resp = await this.client.send(new GenerateDataKeyCommand({
       KeyId: this.keyId,
@@ -88,11 +108,7 @@ export class AwsKMSProvider {
     const dek = Buffer.from(resp.Plaintext);
     const ciphertextBlob = Buffer.from(resp.CiphertextBlob).toString('base64url');
     // cache the mapping for fast decrypt
-    this.cache.set(ciphertextBlob, { dek, expiresAt: Date.now() + this.cacheTtlMs });
-    if (this.cache.size > 1000) {
-      const first = this.cache.keys().next().value;
-      this.cache.delete(first);
-    }
+    this._cacheSet(ciphertextBlob, dek);
     return {
       keyId: this.keyId,
       plaintext: dek,
@@ -106,17 +122,21 @@ export class AwsKMSProvider {
       throw new Error(`AWS KMS cannot decrypt local-format ciphertext (keyId mismatch: expected ${this.keyId}, got local)`);
     }
     const cached = this.cache.get(ciphertextBlob);
-    if (cached && Date.now() < cached.expiresAt) return cached.dek;
+    if (cached && Date.now() < cached.expiresAt) {
+      this.cache.delete(ciphertextBlob);
+      this.cache.set(ciphertextBlob, cached);
+      return Buffer.from(cached.dek);
+    }
+    if (cached) {
+      cached.dek.fill(0);
+      this.cache.delete(ciphertextBlob);
+    }
     const resp = await this.client.send(new DecryptCommand({
       CiphertextBlob: Buffer.from(raw, 'base64url'),
     }));
     if (!resp.Plaintext) throw new Error('KMS Decrypt failed');
     const dek = Buffer.from(resp.Plaintext);
-    this.cache.set(ciphertextBlob, { dek, expiresAt: Date.now() + this.cacheTtlMs });
-    if (this.cache.size > 1000) {
-      const first = this.cache.keys().next().value;
-      this.cache.delete(first);
-    }
+    this._cacheSet(ciphertextBlob, dek);
     return dek;
   }
 }
@@ -136,5 +156,3 @@ export function createKMSProvider({ kmsKeyId, masterKey, kmsClient } = {}) {
 export function isKMSAvailable() {
   return Boolean(process.env.TGCLOUD_KMS_KEY_ID || process.env.AWS_KMS_KEY_ID || process.env.TGCLOUD_MASTER_KEY);
 }
-
-// Clear cache (for tests and rotation)
