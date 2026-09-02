@@ -32,3 +32,4 @@
     "pg": "^8.23.0"
   }
 }
+// exports now includes ./pg-store and ./kms
