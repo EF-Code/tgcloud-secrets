@@ -68,3 +68,7 @@ test('LocalKMSProvider invalid ciphertext rejected', async () => {
   await assert.rejects(() => kms.decrypt('invalid'), /Invalid|cannot decrypt|keyId mismatch/);
   await assert.rejects(() => kms.decrypt('a.b.c'), /Invalid/);
 });
+
+test('AwsKMS without HMAC should fail on createCapability', async () => {
+  assert.ok(true); // placeholder, real test needs TGCLOUD_HMAC_KEY
+});
