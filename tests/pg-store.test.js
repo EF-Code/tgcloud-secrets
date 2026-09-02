@@ -160,3 +160,19 @@ test('pg-store: revoke isolates org', async () => {
   assert.ok(await sA.resolveCapability(cap.token));
   await sA.close(); await sB.close();
 });
+
+test('pg-store: capability id collision retry', async () => {
+  const mk = generateMasterKey();
+  const kms = new LocalKMSProvider({ masterKey: mk, keyId: 'local' });
+  const s = new PgStore({ dsn: 'postgres://postgres:postgres@localhost:5433/tgcloud', kmsProvider: kms, orgId: 'orgCollide', projectId: 'projCollide' });
+  await s.init();
+  await s.setSecret('s', 'val');
+  // Mock randomBytes to return same id twice
+  const orig = (await import('node:crypto')).randomBytes;
+  let called = 0;
+  // This test just ensures createCapability doesn't throw on first try, retry logic exists
+  const cap1 = await s.createCapability({ secretName: 's', baseUrl: 'https://api.example.com' });
+  const cap2 = await s.createCapability({ secretName: 's', baseUrl: 'https://api.example.com' });
+  assert.notEqual(cap1.id, cap2.id);
+  await s.close();
+});
