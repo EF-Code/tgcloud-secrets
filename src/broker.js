@@ -3,7 +3,7 @@ import { lookup } from 'node:dns/promises';
 import { request as httpsRequest } from 'node:https';
 import { isIP } from 'node:net';
 import { Readable } from 'node:stream';
-import { assertAllowedMethod, isLoopbackHost, isPrivateHost, isSafeHttpHost, resolveUpstreamUrl, sanitizeForwardHeaders } from './policy.js';
+import { assertAllowedMethod, isLoopbackHost, isPrivateHost, isSafeHeaderValue, isSafeHttpHost, resolveUpstreamUrl, sanitizeForwardHeaders } from './policy.js';
 
 const DEFAULT_MAX_REQUEST_BYTES = 1 * 1024 * 1024;
 const DEFAULT_MAX_RESPONSE_BYTES = 30 * 1024 * 1024;
@@ -60,7 +60,8 @@ function createRateLimiter(maxRequestsPerMinute) {
             if (value.resetAt <= now) buckets.delete(candidate);
           }
           if (buckets.size >= MAX_RATE_LIMIT_BUCKETS) {
-            return { allowed: false, retryAfter: 1 };
+            const oldest = buckets.keys().next().value;
+            if (oldest !== undefined) buckets.delete(oldest);
           }
         }
         bucket = { count: 0, resetAt: now + windowMs };
@@ -363,7 +364,15 @@ async function performFetch({ capability, requestPayload, maxResponseBytes, fetc
   };
   let upstream;
   try {
-    headers.set(capability.injectHeader, `${capability.injectPrefix}${capability.secretValue}`);
+    const injectValue = `${capability.injectPrefix}${capability.secretValue}`;
+    if (!isSafeHeaderValue(injectValue)) {
+      throw Object.assign(new Error('Capability secret cannot be injected as an HTTP header value'), { statusCode: 502 });
+    }
+    try {
+      headers.set(capability.injectHeader, injectValue);
+    } catch (error) {
+      throw Object.assign(new Error('Capability secret cannot be injected as an HTTP header value'), { statusCode: 502 });
+    }
     // Prevent transparent decompression from producing a body whose encoding
     // header no longer matches what is sent to the capability caller.
     headers.set('accept-encoding', 'identity');
@@ -447,9 +456,18 @@ export function createBrokerServer({
         closeResponse(response, request, 413, { error: 'request_too_large' });
         return;
       }
-      if (request.method === 'GET' && request.url === '/healthz') {
+      let healthPath;
+      try {
+        healthPath = new URL(request.url, 'http://localhost').pathname;
+      } catch {
+        healthPath = request.url;
+      }
+      if ((request.method === 'GET' || request.method === 'HEAD') && healthPath === '/healthz') {
         if (requestHasBody(request)) closeResponse(response, request, 200, { ok: true });
-        else jsonResponse(response, 200, { ok: true });
+        else if (request.method === 'HEAD') {
+          response.writeHead(200, { 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'content-type': 'application/json; charset=utf-8' });
+          response.end();
+        } else jsonResponse(response, 200, { ok: true });
         return;
       }
       if (request.method !== 'POST' || request.url !== '/v1/fetch') {
@@ -459,12 +477,12 @@ export function createBrokerServer({
 
       const capabilityToken = extractCapability(request);
       const peer = requestClientKey(request, trustedProxySet);
-      const authRate = invalidRateLimiter.check(peer);
-      if (!authRate.allowed) {
-        closeResponse(response, request, 429, { error: 'rate_limited' }, { 'retry-after': authRate.retryAfter });
-        return;
-      }
       if (!looksLikeCapabilityToken(capabilityToken)) {
+        const authRate = invalidRateLimiter.check(peer);
+        if (!authRate.allowed) {
+          closeResponse(response, request, 429, { error: 'rate_limited' }, { 'retry-after': authRate.retryAfter });
+          return;
+        }
         closeResponse(response, request, 401, { error: 'invalid_capability' });
         return;
       }
@@ -472,14 +490,17 @@ export function createBrokerServer({
       try {
         capability = await store.resolveCapability(capabilityToken);
       } catch (error) {
-        invalidRateLimiter.release(peer);
         throw error;
       }
       if (!capability) {
+        const authRate = invalidRateLimiter.check(peer);
+        if (!authRate.allowed) {
+          closeResponse(response, request, 429, { error: 'rate_limited' }, { 'retry-after': authRate.retryAfter });
+          return;
+        }
         closeResponse(response, request, 401, { error: 'invalid_capability' });
         return;
       }
-      invalidRateLimiter.release(peer);
       const rate = rateLimiter.check(capability.id);
       if (!rate.allowed) {
         closeResponse(response, request, 429, { error: 'rate_limited' }, { 'retry-after': rate.retryAfter });
@@ -572,7 +593,17 @@ export function createBrokerServer({
       });
     },
     close() {
-      return new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+      return new Promise((resolve, reject) => {
+        const deadline = Date.now() + Math.max(timeoutMs + 5_000, 10_000);
+        const drain = () => {
+          if (totalInFlight === 0 || Date.now() >= deadline) {
+            server.close((error) => error ? reject(error) : resolve());
+            return;
+          }
+          setTimeout(drain, 25).unref?.();
+        };
+        drain();
+      });
     },
   };
 }
