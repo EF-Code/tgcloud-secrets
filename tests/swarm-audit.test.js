@@ -78,3 +78,9 @@ test('12 - ::ffff: mapped public vs private', () => {
   assert.equal(isPrivateHost('::ffff:192.0.2.1'), true);
 });
 
+
+test('13 - query allowed with safe characters', () => {
+  const url = resolveUpstreamUrl('https://api.example.com/', '/v1/health?evil=1', '/v1/');
+  assert.equal(url.search, '?evil=1');
+});
+
