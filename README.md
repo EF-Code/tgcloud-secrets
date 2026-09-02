@@ -119,23 +119,3 @@ npm run check
 ```
 
 The tests exercise encryption, restrictive storage, capability scoping, header handling, broker proxying, and the runtime helper without contacting a real third-party service.
-
-### Swarm Audit Fix 1
-- Documented fix for finding #1 with file:line refs and verification steps.
-
-### Swarm Audit Fix 2
-- Documented fix for finding #2 with file:line refs and verification steps.
-
-### Swarm Audit Fix 3
-- Documented fix for finding #3 with file:line refs and verification steps.
-
-### Swarm Audit Fix 4
-- Documented fix for finding #4 with file:line refs and verification steps.
-
-### Swarm Audit Fix 5
-- Documented fix for finding #5 with file:line refs and verification steps.
-
-### Swarm Audit 2026-09-02 Summary
-- Swarm: neuromancer (strategic) + wintermute (orchestrator) via opencode Task
-- Scope: 5 files, 30 findings, 50 commits
-- Verification: node --test 49 pass, npm audit 0, npm pack 9 files
