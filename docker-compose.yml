@@ -30,3 +30,4 @@ services:
 volumes:
   pgdata:
   # localstack:
+# docker-compose version removed, postgres password via env
