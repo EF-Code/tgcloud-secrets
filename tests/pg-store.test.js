@@ -147,3 +147,16 @@ test('pg-store: list and isolate org/project', async () => {
 test('pg-store: orgId with colon should be rejected', () => {
   assert.throws(() => new PgStore({ dsn: 'postgres://postgres:postgres@localhost:5433/tgcloud', orgId: 'a:b', projectId: 'c', kmsProvider: new LocalKMSProvider({ masterKey: generateMasterKey(), keyId: 'local' }) }), /colon|must not contain/);
 });
+
+test('pg-store: revoke isolates org', async () => {
+  const mk = generateMasterKey();
+  const kmsA = new LocalKMSProvider({ masterKey: mk, keyId: 'local' });
+  const sA = new PgStore({ dsn: 'postgres://postgres:postgres@localhost:5433/tgcloud', kmsProvider: kmsA, orgId: 'orgRevokeA', projectId: 'projRevoke' });
+  const sB = new PgStore({ dsn: 'postgres://postgres:postgres@localhost:5433/tgcloud', kmsProvider: kmsA, orgId: 'orgRevokeB', projectId: 'projRevoke' });
+  await sA.init(); await sB.init();
+  await sA.setSecret('s', 'valA');
+  const cap = await sA.createCapability({ secretName: 's', baseUrl: 'https://api.example.com' });
+  assert.equal(await sB.revokeCapability(cap.id), false);
+  assert.ok(await sA.resolveCapability(cap.token));
+  await sA.close(); await sB.close();
+});
