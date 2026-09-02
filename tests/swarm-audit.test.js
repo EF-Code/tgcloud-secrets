@@ -153,3 +153,15 @@ test('18 - store reserves constructor/prototype', async () => {
   await assert.rejects(() => store.setSecret('prototype', 'val'), /reserved/);
 });
 
+
+test('19 - store fchmod auto-fixes 0644 to 0600', async () => {
+  const { chmod, stat } = await import('node:fs/promises');
+  const dataDir = await mkdtemp(join(tmpdir(), 'tg-swarm-'));
+  const store = new SecretStore({ dataDir });
+  await store.init();
+  const keyPath = join(dataDir, 'master.key');
+  await chmod(keyPath, 0o644);
+  await store.init();
+  assert.equal((await stat(keyPath)).mode & 0o777, 0o600);
+});
+
