@@ -30,6 +30,11 @@ export function createSecretFetch({ endpoint, capability, fetchImpl = globalThis
     if (typeof path !== 'string' || !path.startsWith('/') || path.startsWith('//')) {
       throw new Error('Secret fetch path must be an absolute path');
     }
+    const hashIndex = path.indexOf('#');
+    if (hashIndex !== -1) path = path.slice(0, hashIndex) || '/';
+    if (path.includes('\\') || path.includes('\0') || /[\u0000-\u001F\u007F]/.test(path)) {
+      throw new Error('Secret fetch path contains a forbidden character');
+    }
     if (!init || typeof init !== 'object' || Array.isArray(init)) throw new Error('Fetch options must be an object');
 
     const method = String(init.method === undefined ? 'GET' : init.method).toUpperCase();
@@ -39,7 +44,13 @@ export function createSecretFetch({ endpoint, capability, fetchImpl = globalThis
         ? Object.fromEntries(init.headers.entries())
         : init.headers;
       if (!source || typeof source !== 'object' || Array.isArray(source)) throw new Error('Headers must be an object or Headers instance');
-      for (const [name, value] of Object.entries(source)) headers[name] = String(value);
+      for (const [name, value] of Object.entries(source)) {
+        const stringValue = String(value);
+        if (/[\u0000-\u0008\u000A-\u000D\u000E-\u001F\u007F]/.test(stringValue) || [...stringValue].some((c) => c.codePointAt(0) > 0xff)) {
+          throw new Error(`Header ${name} contains an unsafe value`);
+        }
+        headers[name] = stringValue;
+      }
     }
 
     let body = init.body;
