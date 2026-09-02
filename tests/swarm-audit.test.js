@@ -144,3 +144,12 @@ test('17 - broker graceful drain awaits inFlight', async () => {
   assert.equal(res.status, 200);
 });
 
+
+test('18 - store reserves constructor/prototype', async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'tg-swarm-'));
+  const store = new SecretStore({ dataDir });
+  await store.init();
+  await assert.rejects(() => store.setSecret('constructor', 'val'), /reserved/);
+  await assert.rejects(() => store.setSecret('prototype', 'val'), /reserved/);
+});
+
