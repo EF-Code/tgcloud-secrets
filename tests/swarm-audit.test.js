@@ -37,3 +37,8 @@ test('5 - search control characters rejected', () => {
   assert.throws(() => resolveUpstreamUrl('https://api.example.com/', '/v1/health?evil=\u0000', '/v1/'), /forbidden character/);
 });
 
+
+test('6 - hash control characters rejected', () => {
+  assert.throws(() => resolveUpstreamUrl('https://api.example.com/', '/v1/health#frag\u0000', '/v1/'), /forbidden character/);
+});
+
