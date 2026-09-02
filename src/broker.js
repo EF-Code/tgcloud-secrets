@@ -611,3 +611,4 @@ export function createBrokerServer({
 export { fetchWithPinnedAddress, performFetch, readBody, readResponseBody };
 
 // Swarm audit 2026-09-02: verified via node --test and manual probes
+// swarm: ensure healthz logs do not include query
