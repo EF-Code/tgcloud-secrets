@@ -658,3 +658,4 @@ export { fetchWithPinnedAddress, performFetch, readBody, readResponseBody };
 // swarm: ensure healthz logs do not include query
 // metrics now correctly treats unknown as not loopback
 // readyzCache per-instance, 10s TTL for both ok and !ok
+// XFF multi-entry now rejected (peer fallback)
