@@ -316,7 +316,7 @@ async function run(argv) {
   if (command === 'revoke') {
     const id = positional[0];
     if (!id) throw new Error('Usage: tgcloud-secrets revoke <capability-id>');
-    const revoked = isPgStore ? await store.revokeCapability(id, { projectId }) : await store.revokeCapability(id);
+    const revoked = isPgStore ? await store.revokeCapability(id, { orgId, projectId }) : await store.revokeCapability(id);
     if (!revoked) throw new Error(`Capability not found: ${id}`);
     printJsonOrText(options, { id, revoked: true }, `Revoked capability ${id}`);
     return;

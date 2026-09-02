@@ -6,9 +6,16 @@
  * path prefix, and set of methods; it is not the vendor secret itself.
  */
 function isLoopbackHost(hostname) {
-  const normalized = String(hostname).toLowerCase().replace(/^\[|\]$/g, '').replace(/\.+$/, '');
+  const normalized = String(hostname).toLowerCase().replace(/^\[|\]$/g, '').split('%')[0].replace(/\.+$/, '');
   if (normalized === 'localhost' || normalized === '::1') return true;
-  const octets = normalized.split('.').map(Number);
+  let ip = normalized;
+  if (ip.includes('.')) {
+    try {
+      const urlHost = new URL(`http://${ip}`).hostname;
+      if (/^\d+\.\d+\.\d+\.\d+$/.test(urlHost)) ip = urlHost;
+    } catch {}
+  }
+  const octets = ip.split('.').map(Number);
   return octets.length === 4
     && octets[0] === 127
     && octets.every((octet) => Number.isInteger(octet) && octet >= 0 && octet <= 255);

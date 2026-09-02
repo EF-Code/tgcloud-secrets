@@ -110,7 +110,9 @@ function requestClientKey(request, trustedProxyAddresses) {
   if (trustedProxyAddresses.has(peer)) {
     const forwarded = request.headers['x-forwarded-for'];
     if (typeof forwarded === 'string') {
-      const client = normalizeIpAddress(forwarded.split(',')[0]);
+      // Trusted proxy must strip incoming XFF and set single IP — reject multi-entry to avoid spoofing
+      if (forwarded.includes(',')) return `peer:${peer}`;
+      const client = normalizeIpAddress(forwarded);
       if (client) return `client:${client}`;
     }
   }
@@ -443,6 +445,7 @@ export function createBrokerServer({
   const invalidRateLimiter = createRateLimiter(maxInvalidAttemptsPerMinute);
   const inFlight = new Map();
   let totalInFlight = 0;
+  let readyzCache = null;
 
   const server = createServer({ maxHeaderSize: 16 * 1024 }, async (request, response) => {
     const clientAbort = new AbortController();
@@ -471,18 +474,17 @@ export function createBrokerServer({
         return;
       }
       if (request.method === 'GET' && healthPath === '/readyz') {
-        // Cache health check 10s to avoid KMS cost on scrape
         const now = Date.now();
-        if (!globalThis.__readyzCache || now - globalThis.__readyzCache.ts > 10000) {
+        if (!readyzCache || now - readyzCache.ts > 10000) {
           try {
             if (typeof store.healthCheck === 'function') await store.healthCheck();
             else if (typeof store._readStore === 'function') await store._readStore().catch(() => { throw new Error('store not ready'); });
-            globalThis.__readyzCache = { ts: now, ok: true };
+            readyzCache = { ts: now, ok: true };
           } catch (e) {
-            globalThis.__readyzCache = { ts: now, ok: false };
+            readyzCache = { ts: now, ok: false };
           }
         }
-        if (globalThis.__readyzCache.ok) jsonResponse(response, 200, { ok: true, store: store.constructor.name, inFlight: totalInFlight });
+        if (readyzCache.ok) jsonResponse(response, 200, { ok: true, store: store.constructor.name, inFlight: totalInFlight });
         else jsonResponse(response, 503, { ok: false, error: 'not_ready' });
         return;
       }

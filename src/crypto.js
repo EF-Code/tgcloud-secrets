@@ -38,9 +38,7 @@ function secretAssociatedDataV3(secretName, orgId, projectId) {
   return Buffer.from(`tgcloud-secrets/v3/${org}/${proj}/${secretName}`, 'utf8');
 }
 
-function dekAssociatedData(keyId) {
-  return Buffer.from(`tgcloud-secrets/dek/${keyId}`, 'utf8');
-}
+// dekAssociatedData moved to src/kms.js (LocalKMSProvider) — kept for reference but not used here
 
 export function generateMasterKey() {
   return randomBytes(KEY_BYTES);
@@ -151,6 +149,7 @@ export function decryptSecretWithDEK(record, dek, secretName, orgId, projectId) 
 }
 
 export function encryptSecretEnvelope(value, dek, secretName, { orgId, projectId, keyId, dekCiphertext } = {}) {
+  if (!dekCiphertext || typeof dekCiphertext !== 'string') throw new Error('Missing DEK ciphertext');
   const enc = encryptSecretWithDEK(value, dek, secretName, orgId, projectId);
   return {
     version: ENCRYPTED_SECRET_VERSION_V3,

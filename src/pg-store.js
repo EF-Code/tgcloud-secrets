@@ -19,6 +19,8 @@ import {
   normalizeMethods,
   normalizePathPrefix,
   isSafeHeaderValue,
+  isLoopbackHost,
+  isPrivateHost,
 } from './policy.js';
 
 const { Pool } = pg;
@@ -35,6 +37,16 @@ function validateSecretName(name) {
     throw new Error('Secret name is reserved');
   }
   return name;
+}
+
+function validateOrgProjectId(value, label) {
+  if (typeof value !== 'string' || !/^[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(value)) {
+    throw new Error(`${label} must start with a letter and contain only letters, numbers, ., _, or - (no :, /, \\, %)`);
+  }
+  if (value.includes(':') || value.includes('/') || value.includes('\\') || value.includes('%')) {
+    throw new Error(`${label} must not contain :, /, \\, or %`);
+  }
+  return value;
 }
 
 function validateCapabilityId(id) {
@@ -140,18 +152,24 @@ export class PgStore {
   constructor({ dsn, kmsProvider, masterKey, orgId = 'default', projectId = 'default', poolConfig = {} } = {}) {
     const connectionString = dsn || process.env.DATABASE_URL || process.env.TGCLOUD_SECRETS_DSN;
     if (!connectionString) throw new Error('Postgres DSN required (set DATABASE_URL or TGCLOUD_SECRETS_DSN)');
+    validateOrgProjectId(orgId, 'orgId');
+    validateOrgProjectId(projectId, 'projectId');
     this.dsn = connectionString;
     this.dsnMasked = redactDsn(connectionString);
     this.orgId = orgId;
     this.projectId = projectId;
     this.globalProjectId = `${orgId}:${projectId}`;
-    const isLocal = /localhost|127\.0\.0\.1/.test(connectionString);
+    let hostname = 'localhost';
+    try { hostname = new URL(connectionString).hostname; } catch {}
+    const isLocalHost = isLoopbackHost(hostname) || isPrivateHost(hostname) || hostname === 'localhost';
     this.pool = new Pool({
       connectionString,
-      ssl: isLocal ? false : { rejectUnauthorized: true },
+      ssl: isLocalHost ? false : { rejectUnauthorized: true },
       connectionTimeoutMillis: 5000,
       idleTimeoutMillis: 30000,
-      max: 10,
+      statement_timeout: 5000,
+      query_timeout: 5000,
+      max: 20,
       ...poolConfig,
     });
     this.pool.on('error', (err) => {
@@ -314,31 +332,39 @@ export class PgStore {
       throw new Error(`HMAC key not configured for KMS ${keyId}: ${e.message}`);
     }
 
-    const id = `cap_${randomBytes(10).toString('hex')}`;
-    const token = `tgscap_${randomBytes(32).toString('base64url')}`;
-    const capability = {
-      id,
-      tokenHash: hashCapability(token),
-      secretName,
-      baseUrl: normalizedBaseUrl,
-      pathPrefix: normalizedPathPrefix,
-      methods: normalizedMethods,
-      injectHeader: normalizedHeader,
-      injectPrefix: normalizedInjectPrefix,
-      allowHttp,
-      orgId,
-      projectId,
-      keyId,
-      expiresAt,
-      createdAt: new Date().toISOString(),
-    };
-    capability.metadataMac = hashCapabilityMetadata(capability, hmacKey);
-
-    await this.pool.query(
-      `INSERT INTO capabilities (id, org_id, project_id, secret_id, secret_name, token_hash, base_url, path_prefix, methods, inject_header, inject_prefix, allow_http, expires_at, metadata_mac, key_id)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
-      [id, orgId, globalProjectId, secretId, secretName, capability.tokenHash, normalizedBaseUrl, normalizedPathPrefix, JSON.stringify(normalizedMethods), normalizedHeader, normalizedInjectPrefix, allowHttp, expiresAt, capability.metadataMac, keyId]
-    );
+    let id, token, capability;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      id = `cap_${randomBytes(10).toString('hex')}`;
+      token = `tgscap_${randomBytes(32).toString('base64url')}`;
+      capability = {
+        id,
+        tokenHash: hashCapability(token),
+        secretName,
+        baseUrl: normalizedBaseUrl,
+        pathPrefix: normalizedPathPrefix,
+        methods: normalizedMethods,
+        injectHeader: normalizedHeader,
+        injectPrefix: normalizedInjectPrefix,
+        allowHttp,
+        orgId,
+        projectId,
+        keyId,
+        expiresAt,
+        createdAt: new Date().toISOString(),
+      };
+      capability.metadataMac = hashCapabilityMetadata(capability, hmacKey);
+      try {
+        await this.pool.query(
+          `INSERT INTO capabilities (id, org_id, project_id, secret_id, secret_name, token_hash, base_url, path_prefix, methods, inject_header, inject_prefix, allow_http, expires_at, metadata_mac, key_id)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
+          [id, orgId, globalProjectId, secretId, secretName, capability.tokenHash, normalizedBaseUrl, normalizedPathPrefix, JSON.stringify(normalizedMethods), normalizedHeader, normalizedInjectPrefix, allowHttp, expiresAt, capability.metadataMac, keyId]
+        );
+        break;
+      } catch (e) {
+        if (e.code === '23505' && attempt < 2) continue;
+        throw e;
+      }
+    }
 
     return {
       id,

@@ -163,15 +163,31 @@ export function resolveUpstreamUrl(baseUrl, requestPath, pathPrefix) {
     throw new Error('Request path contains a forbidden encoded character');
   }
   decodePathForPolicy(url.pathname, 'Request path');
-  if (url.search && (UNSAFE_PATH_VALUE.test(url.search) || url.search.includes('\\') || url.search.includes('\0'))) {
-    throw new Error('Request path contains a forbidden character');
-  }
-  if (url.hash && (UNSAFE_PATH_VALUE.test(url.hash) || url.hash.includes('\\') || url.hash.includes('\0'))) {
-    throw new Error('Request path contains a forbidden character');
-  }
-  if (/%00/i.test(url.search) || /%00/i.test(url.hash)) {
-    throw new Error('Request path contains a forbidden encoded character');
-  }
+  // Validate search and hash for both raw and encoded controls
+  const checkSearchHash = (value, label) => {
+    if (!value) return;
+    if (UNSAFE_PATH_VALUE.test(value) || value.includes('\\') || value.includes('\0')) {
+      throw new Error(`${label} contains a forbidden character`);
+    }
+    // Check for encoded controls in query/fragment (e.g., %0a, %0d, %09, %1f, %7f, %00)
+    if (/%(?:0a|0d|09|1f|7f|00)/i.test(value)) {
+      throw new Error(`${label} contains a forbidden encoded character`);
+    }
+    // Also check double-encoded via decode loop
+    let decoded = value;
+    for (let i = 0; i < 3; i++) {
+      try {
+        const next = decodeURIComponent(decoded);
+        if (next === decoded) break;
+        decoded = next;
+        if (UNSAFE_PATH_VALUE.test(decoded) || /%00/i.test(decoded)) {
+          throw new Error(`${label} contains a forbidden encoded character`);
+        }
+      } catch { break; }
+    }
+  };
+  checkSearchHash(url.search, 'Request path');
+  checkSearchHash(url.hash, 'Request path');
   return url;
 }
 
@@ -231,7 +247,15 @@ export function isSafeHttpHost(hostname) {
 export function isLoopbackHost(hostname) {
   const normalized = normalizeHostname(hostname);
   if (normalized === 'localhost' || normalized === '::1') return true;
-  return isIP(normalized) === 4 && normalized.startsWith('127.');
+  // Normalize 127.000.0.1 -> 127.0.0.1 via URL parsing for leading zeros
+  let ip = normalized;
+  if (ip.includes('.')) {
+    try {
+      const urlHost = new URL(`http://${ip}`).hostname;
+      if (isIP(urlHost) === 4) ip = urlHost;
+    } catch {}
+  }
+  return isIP(ip) === 4 && ip.startsWith('127.');
 }
 
 function isPrivateIpv4(hostname) {
@@ -270,7 +294,8 @@ export function isPrivateHost(hostname) {
       || (firstHextet & 0xfe00) === 0xfc00
       || (firstHextet & 0xffc0) === 0xfe80
       || (firstHextet & 0xffc0) === 0xfec0
-      || (firstHextet & 0xff00) === 0xff00) return true;
+      || (firstHextet & 0xff00) === 0xff00
+      || (hextets[0] === 0x2001 && hextets[1] === 0x0db8)) return true;
 
     // Reject private IPv4 addresses embedded in common IPv6 transition
     // mechanisms (NAT64, 6to4, and Teredo).
