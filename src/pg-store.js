@@ -528,3 +528,4 @@ export class PgStore {
 
 export { MAX_SECRET_BYTES, validateSecretName, validateCapabilityId };
 // Pool ssl only disabled for loopback, not private VPC
+// Pool max 20, statement_timeout 5s documented
