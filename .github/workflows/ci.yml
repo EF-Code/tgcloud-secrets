@@ -26,3 +26,4 @@ jobs:
       - run: npm run check
       - run: npm audit --omit=dev --audit-level=moderate
       - run: npm pack --dry-run
+# Swarm audit CI check 3
