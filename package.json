@@ -1,7 +1,7 @@
 {
   "name": "tgcloud-secrets",
   "version": "0.1.0",
-  "description": "Capability-scoped secret injection for Telegram Serverless bots",
+  "description": "Capability-scoped secret injection for Telegram Serverless bots — store vendor secrets encrypted, grant narrow capability tokens, inject on egress",
   "type": "module",
   "bin": {
     "tgcloud-secrets": "src/cli.js"
@@ -27,6 +27,32 @@
     "check": "node --check src/cli.js && node --check src/broker.js && node --check src/store.js && node --check src/policy.js && node --check src/crypto.js && node --check src/kms.js && node --check src/pg-store.js && node --check runtime/secret-fetch.js"
   },
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/EF-Code/tgcloud-secrets.git"
+  },
+  "homepage": "https://github.com/EF-Code/tgcloud-secrets#readme",
+  "bugs": {
+    "url": "https://github.com/EF-Code/tgcloud-secrets/issues"
+  },
+  "keywords": [
+    "telegram",
+    "serverless",
+    "bot",
+    "secrets",
+    "capabilities",
+    "kms",
+    "postgres"
+  ],
+  "author": "EF-Code",
+  "funding": {
+    "type": "github",
+    "url": "https://github.com/sponsors/EF-Code"
+  },
+  "publishConfig": {
+    "provenance": true,
+    "access": "public"
+  },
   "dependencies": {
     "@aws-sdk/client-kms": "^3.1124.0",
     "pg": "^8.23.0"
