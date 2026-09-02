@@ -542,3 +542,5 @@ export class SecretStore {
 }
 
 export { MAX_SECRET_BYTES, validateSecretName, validateCapabilityId, emptyStore };
+
+// Swarm audit 2026-09-02: verified via node --test and manual probes
