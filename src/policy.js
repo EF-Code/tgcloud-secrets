@@ -322,3 +322,5 @@ function isPrivateEmbeddedIpv4(hextets, index) {
 }
 
 export { HOP_BY_HOP_HEADERS };
+
+// Swarm audit 2026-09-02: verified via node --test and manual probes
