@@ -29,7 +29,6 @@ jobs:
           --health-retries 5
     env:
       DATABASE_URL: postgres://postgres:postgres@localhost:5432/tgcloud_test
-      TGCLOUD_MASTER_KEY: Z5zvyC7Tx4iQbiOrZY6ugPukxdNHisYw6BEoIeh8HNQ
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -39,7 +38,22 @@ jobs:
           node-version: ${{ matrix.node-version }}
           cache: npm
       - run: npm ci --ignore-scripts
+      - run: npm run migrate:db -- --dsn "$DATABASE_URL"
+      - run: npm run migration:status -- --dsn "$DATABASE_URL"
       - run: npm test
+      - run: npm run fuzz
       - run: npm run check
+      - name: Validate managed production configuration profile
+        run: |
+          TGCLOUD_ENV=production \
+          DATABASE_URL=postgres://runtime:synthetic@db.internal:5432/tgcloud?sslmode=verify-full \
+          TGCLOUD_KMS_KEY_ID=arn:aws:kms:us-east-1:111122223333:key/synthetic \
+          TGCLOUD_HMAC_KEY="$(node -e "process.stdout.write(require('node:crypto').randomBytes(32).toString('base64url'))")" \
+          TGCLOUD_HMAC_KEY_ID=ci-hmac-2026 \
+          TGCLOUD_DISTRIBUTED_LIMITER=true \
+          node src/cli.js config-check
+      - run: npm run secret-scan
+      - run: npm run license-check
+      - run: node scripts/generate-sbom.mjs > sbom.cdx.json
       - run: npm audit --omit=dev --audit-level=moderate
       - run: npm pack --dry-run

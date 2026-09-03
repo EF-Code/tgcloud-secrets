@@ -10,21 +10,32 @@
     "./runtime": "./runtime/secret-fetch.js",
     "./src/*": "./src/*.js",
     "./pg-store": "./src/pg-store.js",
-    "./kms": "./src/kms.js"
+    "./kms": "./src/kms.js",
+    "./admin": "./src/admin.js",
+    "./auth": "./src/auth.js"
   },
   "files": [
     "LICENSE",
     "README.md",
+    "SECURITY.md",
     "runtime/",
-    "src/"
+    "src/",
+    "migrations/"
   ],
   "engines": {
     "node": ">=22.0.0"
   },
   "scripts": {
     "test": "node --test",
+    "fuzz": "node --test tests/fuzz.test.js",
     "start": "node src/cli.js serve",
-    "check": "node --check src/cli.js && node --check src/broker.js && node --check src/store.js && node --check src/policy.js && node --check src/crypto.js && node --check src/kms.js && node --check src/pg-store.js && node --check runtime/secret-fetch.js"
+    "check": "node --check src/cli.js && node --check src/broker.js && node --check src/store.js && node --check src/policy.js && node --check src/crypto.js && node --check src/kms.js && node --check src/pg-store.js && node --check src/migrations.js && node --check src/config.js && node --check src/rate-limit.js && node --check src/rate-limiter-adapter.js && node --check src/hmac.js && node --check src/auth.js && node --check src/admin.js && node --check src/audit-outbox.js && node --check src/circuit-breaker.js && node --check src/observability.js && node --check src/json.js && node --check src/http.js && node --check runtime/secret-fetch.js",
+    "migrate:db": "node src/cli.js migrate-db",
+    "migration:status": "node src/cli.js migration-status",
+    "config:check": "node src/cli.js config-check",
+    "sbom": "node scripts/generate-sbom.mjs",
+    "secret-scan": "node scripts/secret-scan.mjs",
+    "license-check": "node scripts/check-license-policy.mjs"
   },
   "license": "MIT",
   "repository": {

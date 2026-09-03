@@ -3,3 +3,5 @@ tests/
 .tgcloud-secrets/
 .env*
 *.log
+PRODUCTION_READINESS_PLAN.md
+LUNA_PRODUCTION_IMPLEMENTATION_PROMPT.md
