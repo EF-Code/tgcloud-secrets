@@ -17,6 +17,7 @@ import {
 } from '../src/policy.js';
 import { SecretStore } from '../src/store.js';
 import { createSecretFetch } from '../runtime/secret-fetch.js';
+import { parseRequestFraming } from '../src/http.js';
 
 async function temporaryStore() {
   const dataDir = await mkdtemp(join(tmpdir(), 'tgcloud-secrets-'));
@@ -473,12 +474,155 @@ test('runtime helper forbids redirects and forwards caller cancellation', async 
   assert.equal(seen.signal, controller.signal);
 });
 
+test('runtime helper bounds serialized client requests before sending them', async () => {
+  let called = false;
+  const secretFetch = createSecretFetch({
+    endpoint: 'https://secrets.example.com',
+    capability: `tgscap_${'h'.repeat(32)}`,
+    fetchImpl: async () => {
+      called = true;
+      return new Response('unexpected');
+    },
+  });
+  await assert.rejects(
+    () => secretFetch('/v1/large', { body: 'x'.repeat(1024 * 1024) }),
+    /request is too large/,
+  );
+  assert.equal(called, false);
+});
+
 test('request body limit is marked for connection close', async () => {
   const request = { headers: { 'content-length': '10' } };
   await assert.rejects(
     () => readBody(request, 4),
     (error) => error.statusCode === 413 && error.closeConnection === true,
   );
+});
+
+test('HTTP framing rejects ambiguous or non-canonical lengths', () => {
+  assert.deepEqual(parseRequestFraming({ headers: { 'content-length': '5' } }), { contentLength: 5, chunked: false, hasBody: true });
+  assert.deepEqual(parseRequestFraming({ headers: { 'transfer-encoding': 'chunked' } }), { contentLength: null, chunked: true, hasBody: true });
+  assert.throws(() => parseRequestFraming({ headers: { 'content-length': '5', 'transfer-encoding': 'chunked' } }), /framing/);
+  assert.throws(() => parseRequestFraming({ headers: { 'content-length': '01' } }), /Content-Length/);
+  assert.throws(() => parseRequestFraming({ headers: { 'content-length': '5, 5' } }), /Content-Length/);
+});
+
+test('broker returns a stable unsupported media type error', async (t) => {
+  const token = `tgscap_${'d'.repeat(32)}`;
+  const broker = createBrokerServer({
+    store: {
+      resolveCapability: async () => ({
+        id: 'cap_11111111111111111111',
+        baseUrl: 'https://api.example.com/',
+        pathPrefix: '/',
+        methods: ['GET'],
+        injectHeader: 'x-api-key',
+        injectPrefix: '',
+        secretValue: 'synthetic-value',
+      }),
+    },
+    host: '127.0.0.1',
+    port: 0,
+    logger: { info() {}, error() {} },
+  });
+  const address = await broker.listen();
+  t.after(() => broker.close());
+  const response = await fetch(`http://127.0.0.1:${address.port}/v1/fetch`, {
+    method: 'POST',
+    headers: { 'x-tgcloud-capability': token, 'content-type': 'text/plain' },
+    body: JSON.stringify({ path: '/health' }),
+  });
+  assert.equal(response.status, 415);
+  assert.deepEqual(await response.json(), { error: 'unsupported_media_type' });
+});
+
+test('broker bounds capability resolution and fails closed when the store is unavailable', async (t) => {
+  const broker = createBrokerServer({
+    store: { resolveCapability: async () => new Promise(() => {}) },
+    host: '127.0.0.1',
+    port: 0,
+    timeoutMs: 100,
+    logger: { info() {}, error() {}, warn() {} },
+  });
+  const address = await broker.listen();
+  t.after(() => broker.close());
+  const response = await fetch(`http://127.0.0.1:${address.port}/v1/fetch`, {
+    method: 'POST',
+    headers: { 'x-tgcloud-capability': `tgscap_${'e'.repeat(32)}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ path: '/health' }),
+  });
+  assert.equal(response.status, 503);
+  assert.deepEqual(await response.json(), { error: 'dependency_unavailable' });
+});
+
+test('broker bounds readiness checks when a store health check hangs', async (t) => {
+  const broker = createBrokerServer({
+    store: { healthCheck: async () => new Promise(() => {}) },
+    host: '127.0.0.1',
+    port: 0,
+    timeoutMs: 100,
+    logger: { info() {}, error() {}, warn() {} },
+  });
+  const address = await broker.listen();
+  t.after(() => broker.close());
+  const startedAt = Date.now();
+  const response = await fetch(`http://127.0.0.1:${address.port}/readyz`);
+  assert.equal(response.status, 503);
+  assert.deepEqual(await response.json(), { ok: false, error: 'not_ready' });
+  assert.ok(Date.now() - startedAt < 1_000);
+});
+
+test('broker enforces source and global ceilings before capability resolution', async (t) => {
+  let resolutions = 0;
+  const broker = createBrokerServer({
+    store: { resolveCapability: async () => { resolutions += 1; return null; } },
+    host: '127.0.0.1',
+    port: 0,
+    globalRateLimiter: { check: () => ({ allowed: false, retryAfter: 7 }) },
+    logger: { info() {}, error() {}, warn() {} },
+  });
+  const address = await broker.listen();
+  t.after(() => broker.close());
+  const response = await fetch(`http://127.0.0.1:${address.port}/v1/fetch`, {
+    method: 'POST',
+    headers: { 'x-tgcloud-capability': `tgscap_${'f'.repeat(32)}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ path: '/health' }),
+  });
+  assert.equal(response.status, 429);
+  assert.equal(response.headers.get('retry-after'), '7');
+  assert.equal(resolutions, 0);
+});
+
+test('broker fails closed when required audit delivery times out', async (t) => {
+  const broker = createBrokerServer({
+    store: {
+      resolveCapability: async () => ({
+        id: 'cap_22222222222222222222',
+        baseUrl: 'https://api.example.com/',
+        pathPrefix: '/',
+        methods: ['GET'],
+        injectHeader: 'x-api-key',
+        injectPrefix: '',
+        secretValue: 'synthetic-value',
+      }),
+    },
+    host: '127.0.0.1',
+    port: 0,
+    timeoutMs: 100,
+    fetchImpl: async () => new Response('ok'),
+    lookupImpl: async () => [{ address: '93.184.216.34', family: 4 }],
+    auditLogger: async () => new Promise(() => {}),
+    logger: { info() {}, error() {}, warn() {} },
+  });
+  const address = await broker.listen();
+  t.after(() => broker.close());
+  const response = await fetch(`http://127.0.0.1:${address.port}/v1/fetch`, {
+    method: 'POST',
+    headers: { 'x-tgcloud-capability': `tgscap_${'g'.repeat(32)}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ path: '/health' }),
+  });
+  assert.equal(response.status, 503);
+  assert.deepEqual(await response.json(), { error: 'dependency_unavailable' });
 });
 
 test('broker injects the secret and runtime helper receives the upstream response', async (t) => {

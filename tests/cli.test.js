@@ -10,11 +10,12 @@ import pg from 'pg';
 const { Pool } = pg;
 const testDsn = process.env.DATABASE_URL || process.env.TGCLOUD_SECRETS_DSN || 'postgres://postgres:postgres@localhost:5433/tgcloud';
 
-function runCli(args, input) {
+function runCli(args, input, extraEnv = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [join(process.cwd(), 'src', 'cli.js'), ...args], {
       cwd: process.cwd(),
       stdio: ['pipe', 'pipe', 'pipe'],
+      env: { ...process.env, ...extraEnv },
     });
     let stdout = '';
     let stderr = '';
@@ -54,6 +55,24 @@ test('CLI DATABASE_URL vs --data-dir precedence', async () => {
     if (previous === undefined) delete process.env.DATABASE_URL;
     else process.env.DATABASE_URL = previous;
   }
+});
+
+test('CLI refuses the local file store in production', async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'tgcloud-secrets-cli-production-'));
+  const result = await runCli(['set', 'demo', '--data-dir', dataDir, '--json'], 'must-not-store\n', {
+    TGCLOUD_ENV: 'production',
+    NODE_ENV: 'production',
+    DATABASE_URL: '',
+    TGCLOUD_SECRETS_DSN: '',
+  });
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /Production configuration is invalid/);
+});
+
+test('CLI rejects empty value options before selecting a backend', async () => {
+  const result = await runCli(['serve', '--port', ''], '');
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /--port must not be empty/);
 });
 
 test('CLI migrate --dry-run does not initialize tenant rows', async () => {
