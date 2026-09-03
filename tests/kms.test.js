@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { LocalKMSProvider, AwsKMSProvider } from '../src/kms.js';
+import { LocalKMSProvider, AwsKMSProvider, createKMSProvider } from '../src/kms.js';
 import { generateMasterKey } from '../src/crypto.js';
 import { encryptSecretWithDEK, decryptSecretWithDEK, generateDEK, encryptSecretEnvelope, decryptSecretEnvelope } from '../src/crypto.js';
 
@@ -22,6 +22,15 @@ test('LocalKMSProvider different keyIds produce different ciphertexts', async ()
   const { ciphertextBlob: ct2 } = await kms2.generateDataKey();
   assert.notEqual(ct1, ct2);
   await assert.rejects(() => kms1.decrypt(ct2), /Invalid|Unsupported/);
+});
+
+test('LocalKMSProvider binds DEKs to an encryption context', async () => {
+  const kms = new LocalKMSProvider({ masterKey: generateMasterKey(), keyId: 'local' });
+  const context = { org_id: 'org1', project_id: 'project1', secret_name: 'api-key' };
+  const { ciphertextBlob } = await kms.generateDataKey({ encryptionContext: context });
+  await assert.rejects(() => kms.decrypt(ciphertextBlob, { encryptionContext: { ...context, project_id: 'other' } }), /Unsupported|unable|authenticate|bad/i);
+  const dek = await kms.decrypt(ciphertextBlob, { encryptionContext: context });
+  assert.equal(dek.length, 32);
 });
 
 test('envelope v3 encrypts with org/project binding', async () => {
@@ -65,6 +74,96 @@ test('AwsKMSProvider caches decrypt', async () => {
   kms.clearCache();
   assert.equal(kms.cache.size, 0);
   assert.ok(cached.every((byte) => byte === 0));
+});
+
+test('AwsKMSProvider never reuses a cached DEK for a different encryption context', async () => {
+  let decryptCalls = 0;
+  const mockClient = {
+    send: async (cmd) => {
+      if (cmd.constructor.name === 'DecryptCommand') {
+        decryptCalls += 1;
+        return { Plaintext: Buffer.alloc(32, decryptCalls) };
+      }
+      throw new Error('unexpected command');
+    },
+  };
+  const kms = new AwsKMSProvider({ keyId: 'arn:aws:kms:us-east-1:123456789:key/context', client: mockClient, cacheTtlMs: 60000 });
+  const ct = Buffer.from('context-ct').toString('base64url');
+  await kms.decrypt(ct, { encryptionContext: { tenant: 'one' } });
+  await kms.decrypt(ct, { encryptionContext: { tenant: 'two' } });
+  assert.equal(decryptCalls, 2);
+});
+
+test('AwsKMSProvider can bypass its cache for live dependency checks', async () => {
+  let decryptCalls = 0;
+  const kms = new AwsKMSProvider({
+    keyId: 'arn:aws:kms:us-east-1:123456789:key/live-check',
+    client: {
+      send: async () => {
+        decryptCalls += 1;
+        return { Plaintext: Buffer.alloc(32, decryptCalls) };
+      },
+    },
+  });
+  const ciphertext = Buffer.from('live-check').toString('base64url');
+  const first = await kms.decrypt(ciphertext);
+  const second = await kms.decrypt(ciphertext, { bypassCache: true });
+  assert.equal(decryptCalls, 2);
+  assert.equal(first[0], 1);
+  assert.equal(second[0], 2);
+});
+
+test('AwsKMSProvider can disable plaintext DEK caching', async () => {
+  let decryptCalls = 0;
+  const kms = new AwsKMSProvider({
+    keyId: 'arn:aws:kms:us-east-1:123456789:key/no-cache',
+    cacheTtlMs: 0,
+    client: {
+      send: async () => {
+        decryptCalls += 1;
+        return { Plaintext: Buffer.alloc(32, decryptCalls) };
+      },
+    },
+  });
+  const ciphertext = Buffer.from('no-cache').toString('base64url');
+  await kms.decrypt(ciphertext);
+  await kms.decrypt(ciphertext);
+  assert.equal(decryptCalls, 2);
+  assert.equal(kms.cache.size, 0);
+});
+
+test('KMS provider factory preserves explicit zero cache TTL and rejects empty overrides', () => {
+  const managedKey = 'arn:aws:kms:us-east-1:123456789012:key/factory';
+  const noCache = createKMSProvider({
+    env: { TGCLOUD_KMS_KEY_ID: managedKey, TGCLOUD_KMS_CACHE_TTL_MS: '0' },
+    kmsClient: { send: async () => ({ Plaintext: Buffer.alloc(32, 1) }) },
+  });
+  assert.equal(noCache.cacheTtlMs, 0);
+  assert.throws(() => createKMSProvider({
+    kmsKeyId: '',
+    masterKey: generateMasterKey(),
+    env: { TGCLOUD_KMS_KEY_ID: managedKey },
+  }), /requires keyId|invalid|requires masterKey/i);
+  assert.throws(() => createKMSProvider({
+    kmsKeyId: managedKey,
+    env: { TGCLOUD_KMS_CACHE_TTL_MS: '' },
+  }), /cacheTtlMs/);
+});
+
+test('AwsKMSProvider bounds a hanging KMS operation and aborts its signal', async () => {
+  let signal;
+  const kms = new AwsKMSProvider({
+    keyId: 'arn:aws:kms:us-east-1:123456789:key/timeout',
+    operationTimeoutMs: 100,
+    client: {
+      send: async (_command, options) => {
+        signal = options.abortSignal;
+        return new Promise(() => {});
+      },
+    },
+  });
+  await assert.rejects(() => kms.decrypt(Buffer.from('timeout').toString('base64url')), (error) => error.code === 'TGCLOUD_KMS_TIMEOUT');
+  assert.equal(signal.aborted, true);
 });
 
 test('LocalKMSProvider invalid ciphertext rejected', async () => {
