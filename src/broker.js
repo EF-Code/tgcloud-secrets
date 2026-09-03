@@ -3,18 +3,38 @@ import { lookup } from 'node:dns/promises';
 import { request as httpsRequest } from 'node:https';
 import { isIP } from 'node:net';
 import { Readable } from 'node:stream';
+import { randomUUID } from 'node:crypto';
+import { monitorEventLoopDelay } from 'node:perf_hooks';
 import { assertAllowedMethod, isLoopbackHost, isPrivateHost, isSafeHeaderValue, isSafeHttpHost, resolveUpstreamUrl, sanitizeForwardHeaders } from './policy.js';
+import { createRateLimiter, MemoryRateLimiter, normalizeRateLimitDecision } from './rate-limit.js';
+import { CircuitBreakerPool } from './circuit-breaker.js';
+import { createRedactingLogger } from './observability.js';
+import { parseStrictJson } from './json.js';
+import { parseRequestFraming } from './http.js';
 
 const DEFAULT_MAX_REQUEST_BYTES = 1 * 1024 * 1024;
 const DEFAULT_MAX_RESPONSE_BYTES = 30 * 1024 * 1024;
 const DEFAULT_MAX_CONCURRENT_REQUESTS_PER_CAPABILITY = 8;
 const DEFAULT_MAX_CONCURRENT_REQUESTS = 32;
-const MAX_RATE_LIMIT_BUCKETS = 10_000;
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 
 function assertPositiveLimit(value, name) {
   if (!Number.isSafeInteger(value) || value <= 0) throw new Error(`${name} must be a positive integer`);
   return value;
+}
+
+function boundedOperation(operation, timeoutMs, message, statusCode = 503, publicCode = 'dependency_unavailable') {
+  const pending = Promise.resolve().then(operation);
+  // A timed-out dependency can still reject later. Observe that rejection so
+  // a dead database, limiter, or audit adapter cannot create an unhandled
+  // rejection after the request has been answered.
+  pending.catch(() => {});
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(Object.assign(new Error(message), { statusCode, publicCode })), timeoutMs);
+    timer.unref?.();
+  });
+  return Promise.race([pending, timeout]).finally(() => clearTimeout(timer));
 }
 
 function jsonResponse(response, status, payload, extraHeaders = {}) {
@@ -35,8 +55,11 @@ function publicErrorCode(status) {
     case 401: return 'invalid_capability';
     case 408: return 'request_timeout';
     case 413: return 'request_too_large';
+    case 415: return 'unsupported_media_type';
     case 429: return 'rate_limited';
+    case 423: return 'tenant_disabled';
     case 502: return 'upstream_error';
+    case 503: return 'dependency_unavailable';
     default: return 'internal_error';
   }
 }
@@ -45,41 +68,6 @@ function extractCapability(request) {
   const value = request.headers['x-tgcloud-capability'];
   if (Array.isArray(value)) return undefined;
   return value;
-}
-
-function createRateLimiter(maxRequestsPerMinute) {
-  const windowMs = 60_000;
-  const buckets = new Map();
-  return {
-    check(key) {
-      const now = Date.now();
-      let bucket = buckets.get(key);
-      if (!bucket || now >= bucket.resetAt) {
-        if (!bucket && buckets.size >= MAX_RATE_LIMIT_BUCKETS) {
-          for (const [candidate, value] of buckets) {
-            if (value.resetAt <= now) buckets.delete(candidate);
-          }
-          if (buckets.size >= MAX_RATE_LIMIT_BUCKETS) {
-            const oldest = buckets.keys().next().value;
-            if (oldest !== undefined) buckets.delete(oldest);
-          }
-        }
-        bucket = { count: 0, resetAt: now + windowMs };
-        buckets.set(key, bucket);
-      }
-      if (bucket.count >= maxRequestsPerMinute) {
-        return { allowed: false, retryAfter: Math.max(1, Math.ceil((bucket.resetAt - now) / 1_000)) };
-      }
-      bucket.count += 1;
-      return { allowed: true, retryAfter: 0 };
-    },
-    release(key) {
-      const bucket = buckets.get(key);
-      if (!bucket) return;
-      bucket.count = Math.max(0, bucket.count - 1);
-      if (bucket.count === 0 && Date.now() >= bucket.resetAt) buckets.delete(key);
-    },
-  };
 }
 
 function looksLikeCapabilityToken(value) {
@@ -128,14 +116,17 @@ function closeResponse(response, request, status, payload, extraHeaders = {}) {
   else response.end();
 }
 
-function requestHasBody(request) {
-  const declared = Number(request.headers['content-length']);
-  return (Number.isFinite(declared) && declared > 0) || request.headers['transfer-encoding'] !== undefined;
+function auditPath(value) {
+  try {
+    return new URL(value, 'https://tgcloud.invalid').pathname;
+  } catch {
+    return '/invalid';
+  }
 }
 
 async function readBody(request, maximumBytes, timeoutMs = 15_000) {
-  const declared = Number(request.headers['content-length']);
-  if (Number.isFinite(declared) && (declared < 0 || declared > maximumBytes)) {
+  const { contentLength: declared } = parseRequestFraming(request);
+  if (declared !== null && declared > maximumBytes) {
     throw Object.assign(new Error('Request body is too large'), { statusCode: 413, closeConnection: true });
   }
 
@@ -149,7 +140,7 @@ async function readBody(request, maximumBytes, timeoutMs = 15_000) {
       }
       chunks.push(chunk);
     }
-    return Buffer.concat(chunks).toString('utf8');
+    return Buffer.concat(chunks);
   })();
   // The iterator may settle after the timeout destroys the socket. Observe
   // that late rejection so it cannot become an unhandled promise rejection.
@@ -289,16 +280,16 @@ function fetchWithPinnedAddress(target, options, resolvedAddress) {
 async function assertSafeResolvedHost(target, capability, lookupImpl) {
   const hostname = target.hostname.replace(/^\[|\]$/g, '');
   if (target.protocol !== 'https:' && target.protocol !== 'http:') {
-    throw Object.assign(new Error('Upstream URL must use HTTP or HTTPS'), { statusCode: 502 });
+    throw Object.assign(new Error('Upstream URL must use HTTP or HTTPS'), { statusCode: 502, circuitFailure: false });
   }
   const localHttp = target.protocol === 'http:' && capability.allowHttp === true && isSafeHttpHost(hostname);
   if (target.protocol === 'http:' && !localHttp) {
-    throw Object.assign(new Error('HTTP upstreams are restricted to explicit loopback development targets'), { statusCode: 502 });
+    throw Object.assign(new Error('HTTP upstreams are restricted to explicit loopback development targets'), { statusCode: 502, circuitFailure: false });
   }
   if (localHttp) return undefined;
   if (isIP(hostname)) {
     if (isPrivateHost(hostname)) {
-      throw Object.assign(new Error('Upstream hostname resolved to a private or link-local address'), { statusCode: 502 });
+      throw Object.assign(new Error('Upstream hostname resolved to a private or link-local address'), { statusCode: 502, circuitFailure: false });
     }
     return { address: hostname, family: isIP(hostname) };
   }
@@ -308,11 +299,11 @@ async function assertSafeResolvedHost(target, capability, lookupImpl) {
   } catch (error) {
     throw Object.assign(new Error('Upstream hostname could not be resolved'), { cause: error, statusCode: 502 });
   }
-  if (!Array.isArray(addresses) || addresses.length === 0 || addresses.some((entry) => {
+  if (!Array.isArray(addresses) || addresses.length === 0 || addresses.length > 16 || addresses.some((entry) => {
     const address = entry?.address;
     return !address || isIP(address) === 0 || isPrivateHost(address);
   })) {
-    throw Object.assign(new Error('Upstream hostname resolved to a private or link-local address'), { statusCode: 502 });
+    throw Object.assign(new Error('Upstream hostname resolved to a private or link-local address'), { statusCode: 502, circuitFailure: false });
   }
   const address = addresses[0].address;
   return { address, family: isIP(address) };
@@ -327,20 +318,20 @@ async function performFetch({ capability, requestPayload, maxResponseBytes, fetc
     target = resolveUpstreamUrl(capability.baseUrl, requestPayload.path, capability.pathPrefix);
     headers = sanitizeForwardHeaders(requestPayload.headers, capability.injectHeader);
   } catch (error) {
-    if (error.statusCode) throw error;
-    throw Object.assign(error, { statusCode: 400 });
+    if (error?.statusCode) throw error;
+    throw Object.assign(error, { statusCode: 400, circuitFailure: false });
   }
   if ((method === 'GET' || method === 'HEAD') && requestPayload.body !== undefined && requestPayload.body !== '') {
-    throw Object.assign(new Error(`${method} requests cannot include a body`), { statusCode: 400 });
+    throw Object.assign(new Error(`${method} requests cannot include a body`), { statusCode: 400, circuitFailure: false });
   }
   if (requestPayload.body !== undefined && typeof requestPayload.body !== 'string') {
-    throw Object.assign(new Error('Request body must be a string'), { statusCode: 400 });
+    throw Object.assign(new Error('Request body must be a string'), { statusCode: 400, circuitFailure: false });
   }
 
   const controller = new AbortController();
   let rejectClientCancellation;
   const clientCancellation = requestSignal ? new Promise((_, reject) => {
-    rejectClientCancellation = () => reject(Object.assign(new Error('Client disconnected'), { statusCode: 499, clientAborted: true }));
+    rejectClientCancellation = () => reject(Object.assign(new Error('Client disconnected'), { statusCode: 499, clientAborted: true, circuitFailure: false }));
   }) : undefined;
   const abortFromRequest = () => {
     controller.abort(requestSignal?.reason);
@@ -368,12 +359,12 @@ async function performFetch({ capability, requestPayload, maxResponseBytes, fetc
   try {
     const injectValue = `${capability.injectPrefix}${capability.secretValue}`;
     if (!isSafeHeaderValue(injectValue)) {
-      throw Object.assign(new Error('Capability secret cannot be injected as an HTTP header value'), { statusCode: 502 });
+      throw Object.assign(new Error('Capability secret cannot be injected as an HTTP header value'), { statusCode: 502, circuitFailure: false });
     }
     try {
       headers.set(capability.injectHeader, injectValue);
     } catch (error) {
-      throw Object.assign(new Error('Capability secret cannot be injected as an HTTP header value'), { statusCode: 502 });
+      throw Object.assign(new Error('Capability secret cannot be injected as an HTTP header value'), { statusCode: 502, circuitFailure: false });
     }
     // Prevent transparent decompression from producing a body whose encoding
     // header no longer matches what is sent to the capability caller.
@@ -393,7 +384,7 @@ async function performFetch({ capability, requestPayload, maxResponseBytes, fetc
     }));
     if (REDIRECT_STATUSES.has(upstream.status)) {
       await cancelUpstreamBody(upstream);
-      throw Object.assign(new Error('Upstream redirects are not allowed'), { statusCode: 502 });
+      throw Object.assign(new Error('Upstream redirects are not allowed'), { statusCode: 502, circuitFailure: false });
     }
 
     const bytes = await raceWithDeadline(readResponseBody(upstream, maxResponseBytes));
@@ -405,7 +396,7 @@ async function performFetch({ capability, requestPayload, maxResponseBytes, fetc
     };
   } catch (error) {
     await cancelUpstreamBody(upstream);
-    if (error.statusCode) throw error;
+    if (error?.statusCode) throw error;
     throw Object.assign(new Error('Upstream request failed'), { cause: error, statusCode: 502 });
   } finally {
     clearTimeout(timeoutHandle);
@@ -421,10 +412,23 @@ export function createBrokerServer({
   maxResponseBytes = DEFAULT_MAX_RESPONSE_BYTES,
   timeoutMs = 15_000,
   maxRequestsPerMinute = 120,
+  maxRequestsPerTenantPerMinute = 600,
+  maxRequestsPerSourcePerMinute = 600,
+  maxGlobalRequestsPerMinute = 10_000,
   maxInvalidAttemptsPerMinute = 60,
   maxConcurrentRequestsPerCapability = DEFAULT_MAX_CONCURRENT_REQUESTS_PER_CAPABILITY,
   maxConcurrentRequests = DEFAULT_MAX_CONCURRENT_REQUESTS,
   trustedProxyAddresses = [],
+  rateLimiter,
+  invalidRateLimiter,
+  rateLimiterBackend,
+  invalidRateLimiterBackend,
+  tenantRateLimiter,
+  globalRateLimiter,
+  sourceRateLimiter,
+  circuitBreakerPool,
+  auditRequired = true,
+  auditLogger,
   fetchImpl,
   lookupImpl,
   logger = console,
@@ -434,18 +438,80 @@ export function createBrokerServer({
   assertPositiveLimit(maxResponseBytes, 'maxResponseBytes');
   assertPositiveLimit(timeoutMs, 'timeoutMs');
   assertPositiveLimit(maxRequestsPerMinute, 'maxRequestsPerMinute');
+  assertPositiveLimit(maxRequestsPerTenantPerMinute, 'maxRequestsPerTenantPerMinute');
+  assertPositiveLimit(maxRequestsPerSourcePerMinute, 'maxRequestsPerSourcePerMinute');
+  assertPositiveLimit(maxGlobalRequestsPerMinute, 'maxGlobalRequestsPerMinute');
   assertPositiveLimit(maxInvalidAttemptsPerMinute, 'maxInvalidAttemptsPerMinute');
   assertPositiveLimit(maxConcurrentRequestsPerCapability, 'maxConcurrentRequestsPerCapability');
   assertPositiveLimit(maxConcurrentRequests, 'maxConcurrentRequests');
+  if (typeof auditRequired !== 'boolean') throw new Error('auditRequired must be a boolean');
   const trustedProxySet = normalizeTrustedProxyAddresses(trustedProxyAddresses);
   if (!isLoopbackHost(host) && trustedProxySet.size === 0) {
     throw new Error('Non-loopback broker binds require trustedProxyAddresses for client-aware rate limiting');
   }
-  const rateLimiter = createRateLimiter(maxRequestsPerMinute);
-  const invalidRateLimiter = createRateLimiter(maxInvalidAttemptsPerMinute);
+  const requestEmergencyLimiter = new MemoryRateLimiter({ maxRequestsPerMinute, maxBuckets: 10_000 });
+  const tenantEmergencyLimiter = new MemoryRateLimiter({ maxRequestsPerMinute: maxRequestsPerTenantPerMinute, maxBuckets: 10_000 });
+  const sourceEmergencyLimiter = new MemoryRateLimiter({ maxRequestsPerMinute: maxRequestsPerSourcePerMinute, maxBuckets: 10_000 });
+  const globalEmergencyLimiter = new MemoryRateLimiter({ maxRequestsPerMinute: maxGlobalRequestsPerMinute, maxBuckets: 1 });
+  const authEmergencyLimiter = new MemoryRateLimiter({ maxRequestsPerMinute: maxInvalidAttemptsPerMinute, maxBuckets: 10_000 });
+  const productionRuntime = process.env.TGCLOUD_ENV === 'production' || process.env.NODE_ENV === 'production';
+  const enabled = (value) => value === true || value === '1' || value === 'true';
+  if (productionRuntime && (fetchImpl || lookupImpl)) {
+    throw new Error('Production broker does not allow custom network transports');
+  }
+  if (productionRuntime && !isLoopbackHost(host)
+    && (!enabled(process.env.TGCLOUD_TLS_TERMINATED) || !enabled(process.env.TGCLOUD_EDGE_AUTHENTICATED))) {
+    throw new Error('Production public broker binds require verified TLS termination and edge authentication');
+  }
+  if (productionRuntime && !auditRequired) {
+    throw new Error('Production broker requires auditRequired=true');
+  }
+  const customLimitersComplete = [rateLimiter, invalidRateLimiter, tenantRateLimiter, sourceRateLimiter, globalRateLimiter].every(Boolean);
+  if (productionRuntime && !rateLimiterBackend && !customLimitersComplete) {
+    throw new Error('Production broker requires a distributed limiter backend or an explicit limiter for every route');
+  }
+  const limiterTimeoutMs = Math.max(100, Math.min(timeoutMs, 5_000));
+  const requestLimiter = rateLimiter || createRateLimiter({ maxRequestsPerMinute, backend: rateLimiterBackend, fallback: requestEmergencyLimiter, keyPrefix: 'tgcloud:proxy', operationTimeoutMs: limiterTimeoutMs });
+  const authLimiter = invalidRateLimiter || createRateLimiter({ maxRequestsPerMinute: maxInvalidAttemptsPerMinute, backend: invalidRateLimiterBackend || rateLimiterBackend, fallback: authEmergencyLimiter, keyPrefix: 'tgcloud:auth', operationTimeoutMs: limiterTimeoutMs });
+  const tenantLimiter = tenantRateLimiter || createRateLimiter({ maxRequestsPerMinute: maxRequestsPerTenantPerMinute, backend: rateLimiterBackend, fallback: tenantEmergencyLimiter, keyPrefix: 'tgcloud:tenant', operationTimeoutMs: limiterTimeoutMs });
+  const sourceLimiter = sourceRateLimiter || createRateLimiter({ maxRequestsPerMinute: maxRequestsPerSourcePerMinute, backend: rateLimiterBackend, fallback: sourceEmergencyLimiter, keyPrefix: 'tgcloud:source', operationTimeoutMs: limiterTimeoutMs });
+  const globalLimiter = globalRateLimiter || createRateLimiter({ maxRequestsPerMinute: maxGlobalRequestsPerMinute, backend: rateLimiterBackend, fallback: globalEmergencyLimiter, keyPrefix: 'tgcloud:global', operationTimeoutMs: limiterTimeoutMs });
+  const breakers = circuitBreakerPool || new CircuitBreakerPool({ maxEntries: 1_000 });
+  const safeLogger = createRedactingLogger(logger);
+  const writeAudit = auditLogger || (typeof store.recordCapabilityUse === 'function' ? (event) => store.recordCapabilityUse(event) : null);
+  if (auditRequired && productionRuntime && !writeAudit) {
+    throw new Error('Production broker requires a durable audit logger');
+  }
   const inFlight = new Map();
+  const eventLoopDelay = monitorEventLoopDelay({ resolution: 20 });
+  eventLoopDelay.enable();
   let totalInFlight = 0;
   let readyzCache = null;
+  let requestsTotal = 0;
+  let rateLimitedTotal = 0;
+  let authFailedTotal = 0;
+  let upstreamErrorsTotal = 0;
+  let limiterErrorsTotal = 0;
+  let requestLatencyTotalMs = 0;
+  let requestLatencyMaxMs = 0;
+
+  const checkLimiter = async (limiter, key) => {
+    try {
+      const result = normalizeRateLimitDecision(await boundedOperation(
+        () => limiter.check(key),
+        limiterTimeoutMs,
+        'Rate limiter timed out',
+      ));
+      if (productionRuntime && result.reason === 'limiter_unavailable') {
+        return { allowed: false, retryAfter: 1, reason: 'limiter_unavailable' };
+      }
+      return result;
+    } catch (error) {
+      limiterErrorsTotal += 1;
+      safeLogger.error('rate limiter failed', { code: 'limiter_unavailable', errorName: error?.name || 'Error' });
+      return { allowed: false, retryAfter: 1, reason: 'limiter_unavailable' };
+    }
+  };
 
   const server = createServer({ maxHeaderSize: 16 * 1024 }, async (request, response) => {
     const clientAbort = new AbortController();
@@ -454,8 +520,9 @@ export function createBrokerServer({
       if (!response.writableFinished) clientAbort.abort();
     });
     try {
-      const declaredRequestBytes = Number(request.headers['content-length']);
-      if (Number.isFinite(declaredRequestBytes) && declaredRequestBytes > maxRequestBytes) {
+      const framing = parseRequestFraming(request);
+      const declaredRequestBytes = framing.contentLength ?? 0;
+      if (declaredRequestBytes > maxRequestBytes) {
         closeResponse(response, request, 413, { error: 'request_too_large' });
         return;
       }
@@ -466,7 +533,7 @@ export function createBrokerServer({
         healthPath = request.url;
       }
       if ((request.method === 'GET' || request.method === 'HEAD') && healthPath === '/healthz') {
-        if (requestHasBody(request)) closeResponse(response, request, 200, { ok: true });
+        if (framing.hasBody) closeResponse(response, request, 400, { error: 'invalid_request' });
         else if (request.method === 'HEAD') {
           response.writeHead(200, { 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'content-type': 'application/json; charset=utf-8' });
           response.end();
@@ -474,11 +541,18 @@ export function createBrokerServer({
         return;
       }
       if (request.method === 'GET' && healthPath === '/readyz') {
+        if (framing.hasBody) {
+          closeResponse(response, request, 400, { error: 'invalid_request' });
+          return;
+        }
         const now = Date.now();
         if (!readyzCache || now - readyzCache.ts > 10000) {
           try {
-            if (typeof store.healthCheck === 'function') await store.healthCheck();
-            else if (typeof store._readStore === 'function') await store._readStore().catch(() => { throw new Error('store not ready'); });
+            if (typeof store.healthCheck === 'function') {
+              await boundedOperation(() => store.healthCheck(), timeoutMs, 'Readiness dependency timed out');
+            } else if (typeof store._readStore === 'function') {
+              await boundedOperation(() => store._readStore().catch(() => { throw new Error('store not ready'); }), timeoutMs, 'Readiness dependency timed out');
+            }
             readyzCache = { ts: now, ok: true };
           } catch (e) {
             readyzCache = { ts: now, ok: false };
@@ -489,9 +563,13 @@ export function createBrokerServer({
         return;
       }
       if (request.method === 'GET' && healthPath === '/metrics') {
+        if (framing.hasBody) {
+          closeResponse(response, request, 400, { error: 'invalid_request' });
+          return;
+        }
         // Restrict metrics to loopback or trusted proxy to avoid leaking cap IDs
         const peer = normalizeIpAddress(request.socket.remoteAddress) || 'unknown';
-        const isLoopback = isLoopbackHost(peer) || peer === 'unknown';
+        const isLoopback = isLoopbackHost(peer);
         const isTrusted = trustedProxySet.has(peer);
         if (!isLoopback && !isTrusted) {
           closeResponse(response, request, 403, { error: 'forbidden' });
@@ -508,6 +586,30 @@ export function createBrokerServer({
           '# HELP tgcloud_proxy_max_concurrent_requests_per_capability Max per capability',
           '# TYPE tgcloud_proxy_max_concurrent_requests_per_capability gauge',
           `tgcloud_proxy_max_concurrent_requests_per_capability ${maxConcurrentRequestsPerCapability}`,
+          '# HELP tgcloud_proxy_requests_total Total proxy requests completed or rejected after authentication',
+          '# TYPE tgcloud_proxy_requests_total counter',
+          `tgcloud_proxy_requests_total ${requestsTotal}`,
+          '# HELP tgcloud_proxy_rate_limited_total Total rate-limited requests',
+          '# TYPE tgcloud_proxy_rate_limited_total counter',
+          `tgcloud_proxy_rate_limited_total ${rateLimitedTotal}`,
+          '# HELP tgcloud_proxy_auth_failures_total Total invalid capability attempts',
+          '# TYPE tgcloud_proxy_auth_failures_total counter',
+          `tgcloud_proxy_auth_failures_total ${authFailedTotal}`,
+          '# HELP tgcloud_proxy_upstream_errors_total Total upstream failures',
+          '# TYPE tgcloud_proxy_upstream_errors_total counter',
+          `tgcloud_proxy_upstream_errors_total ${upstreamErrorsTotal}`,
+          '# HELP tgcloud_proxy_limiter_errors_total Rate limiter failures handled by fail-closed controls',
+          '# TYPE tgcloud_proxy_limiter_errors_total counter',
+          `tgcloud_proxy_limiter_errors_total ${limiterErrorsTotal}`,
+          '# HELP tgcloud_proxy_request_latency_average_ms Average proxy request latency in milliseconds',
+          '# TYPE tgcloud_proxy_request_latency_average_ms gauge',
+          `tgcloud_proxy_request_latency_average_ms ${requestsTotal === 0 ? 0 : (requestLatencyTotalMs / requestsTotal).toFixed(3)}`,
+          '# HELP tgcloud_proxy_request_latency_max_ms Maximum observed proxy request latency in milliseconds',
+          '# TYPE tgcloud_proxy_request_latency_max_ms gauge',
+          `tgcloud_proxy_request_latency_max_ms ${requestLatencyMaxMs.toFixed(3)}`,
+          '# HELP tgcloud_proxy_event_loop_delay_p99_ms Event loop delay p99 in milliseconds',
+          '# TYPE tgcloud_proxy_event_loop_delay_p99_ms gauge',
+          `tgcloud_proxy_event_loop_delay_p99_ms ${(Number.isFinite(eventLoopDelay.percentile(99)) ? eventLoopDelay.percentile(99) / 1e6 : 0).toFixed(3)}`,
         ];
         const body = Buffer.from(lines.join('\n') + '\n');
         response.writeHead(200, { 'content-type': 'text/plain; version=0.0.4', 'content-length': body.length, 'cache-control': 'no-store' });
@@ -519,11 +621,23 @@ export function createBrokerServer({
         return;
       }
 
-      const capabilityToken = extractCapability(request);
       const peer = requestClientKey(request, trustedProxySet);
+      const preAuthRates = await Promise.all([
+        checkLimiter(sourceLimiter, peer),
+        checkLimiter(globalLimiter, 'all'),
+      ]);
+      const preAuthRate = preAuthRates.find((candidate) => !candidate.allowed) || preAuthRates[0];
+      if (!preAuthRate.allowed) {
+        rateLimitedTotal += 1;
+        closeResponse(response, request, 429, { error: 'rate_limited' }, { 'retry-after': preAuthRate.retryAfter });
+        return;
+      }
+      const capabilityToken = extractCapability(request);
       if (!looksLikeCapabilityToken(capabilityToken)) {
-        const authRate = invalidRateLimiter.check(peer);
+        authFailedTotal += 1;
+        const authRate = await checkLimiter(authLimiter, peer);
         if (!authRate.allowed) {
+          rateLimitedTotal += 1;
           closeResponse(response, request, 429, { error: 'rate_limited' }, { 'retry-after': authRate.retryAfter });
           return;
         }
@@ -532,35 +646,58 @@ export function createBrokerServer({
       }
       let capability;
       try {
-        capability = await store.resolveCapability(capabilityToken);
+        capability = await boundedOperation(
+          () => store.resolveCapability(capabilityToken),
+          timeoutMs,
+          'Capability store timed out',
+        );
       } catch (error) {
-        throw error;
+        if (error?.statusCode === 423 || error?.statusCode === 503) throw error;
+        throw Object.assign(new Error('Capability store unavailable'), { statusCode: 503, publicCode: 'dependency_unavailable', cause: error });
       }
       if (!capability) {
-        const authRate = invalidRateLimiter.check(peer);
+        authFailedTotal += 1;
+        const authRate = await checkLimiter(authLimiter, peer);
         if (!authRate.allowed) {
+          rateLimitedTotal += 1;
           closeResponse(response, request, 429, { error: 'rate_limited' }, { 'retry-after': authRate.retryAfter });
           return;
         }
         closeResponse(response, request, 401, { error: 'invalid_capability' });
         return;
       }
-      const rate = rateLimiter.check(capability.id);
+      const rates = await Promise.all([
+        checkLimiter(requestLimiter, `capability:${capability.id}`),
+        checkLimiter(tenantLimiter, `tenant:${capability.orgId}:${capability.projectId}`),
+      ]);
+      const rate = rates.find((candidate) => !candidate.allowed) || rates[0];
       if (!rate.allowed) {
+        rateLimitedTotal += 1;
         closeResponse(response, request, 429, { error: 'rate_limited' }, { 'retry-after': rate.retryAfter });
         return;
       }
 
       const rawBody = await readBody(request, maxRequestBytes, timeoutMs);
+      if (typeof request.headers['content-type'] !== 'string' || !/^application\/json(?:\s*;|$)/i.test(request.headers['content-type'])) {
+        throw Object.assign(new Error('Request content type must be application/json'), { statusCode: 415 });
+      }
       let payload;
       try {
-        payload = JSON.parse(rawBody);
-      } catch {
-        throw Object.assign(new Error('Request body must be valid JSON'), { statusCode: 400 });
+        payload = parseStrictJson(rawBody, { maxBytes: maxRequestBytes, maxDepth: 10, maxFields: 128, maxArrayItems: 128, maxStringBytes: Math.min(maxRequestBytes, 256 * 1024) });
+      } catch (error) {
+        throw error?.statusCode ? error : Object.assign(new Error('Request body must be valid JSON'), { statusCode: 400 });
       }
-      if (!payload || typeof payload.path !== 'string') {
+      if (!payload || typeof payload !== 'object' || Array.isArray(payload) || typeof payload.path !== 'string') {
         throw Object.assign(new Error('Request must include a path'), { statusCode: 400 });
       }
+      const allowedPayloadKeys = new Set(['path', 'method', 'headers', 'body']);
+      if (Object.keys(payload).some((key) => !allowedPayloadKeys.has(key))) {
+        throw Object.assign(new Error('Request contains unsupported fields'), { statusCode: 400 });
+      }
+      if (payload.path.length === 0 || payload.path.length > 4_096) throw Object.assign(new Error('Request path is invalid'), { statusCode: 400 });
+      if (payload.method !== undefined && (typeof payload.method !== 'string' || payload.method.length === 0 || payload.method.length > 16)) throw Object.assign(new Error('Request method is invalid'), { statusCode: 400 });
+      if (payload.headers !== undefined && (!payload.headers || typeof payload.headers !== 'object' || Array.isArray(payload.headers))) throw Object.assign(new Error('Request headers must be an object'), { statusCode: 400 });
+      if (payload.body !== undefined && typeof payload.body !== 'string') throw Object.assign(new Error('Request body must be a string'), { statusCode: 400 });
 
       const active = inFlight.get(capability.id) || 0;
       if (active >= maxConcurrentRequestsPerCapability || totalInFlight >= maxConcurrentRequests) {
@@ -569,46 +706,86 @@ export function createBrokerServer({
       }
       inFlight.set(capability.id, active + 1);
       totalInFlight += 1;
+      const requestId = randomUUID();
+      const requestStartedAt = Date.now();
+      let auditStatus = 500;
+      response.setHeader('x-request-id', requestId);
+      requestsTotal += 1;
 
+      let result;
+      let failure;
       try {
-        const result = await performFetch({
-          capability,
-          requestPayload: payload,
-          maxResponseBytes,
-          fetchImpl,
-          lookupImpl,
-          timeoutMs,
-          signal: clientAbort.signal,
-        });
-        for (const [name, value] of Object.entries(result.headers)) response.setHeader(name, value);
-        response.statusCode = result.status;
-        response.end(result.bytes);
-        logger.info?.('proxy request', {
-          capabilityId: capability.id,
-          method: payload.method === undefined ? 'GET' : String(payload.method).toUpperCase(),
-          path: new URL(payload.path, 'https://tgcloud.invalid').pathname,
-          status: result.status,
-        });
+        result = await breakers.for(capability.baseUrl).execute(
+          () => performFetch({
+            capability,
+            requestPayload: payload,
+            maxResponseBytes,
+            fetchImpl,
+            lookupImpl,
+            timeoutMs,
+            signal: clientAbort.signal,
+          }),
+          { isFailure: (candidate) => candidate?.status >= 500 },
+        );
+        auditStatus = result.status;
+      } catch (error) {
+        auditStatus = Number.isInteger(error?.statusCode) ? error.statusCode : 502;
+        failure = error;
       } finally {
+        if (writeAudit) {
+          try {
+            await boundedOperation(() => writeAudit({
+              capabilityId: capability.id,
+              status: auditStatus,
+              method: typeof payload.method === 'string' && /^[A-Za-z]+$/.test(payload.method) && payload.method.length <= 16 ? payload.method.toUpperCase() : 'INVALID',
+              path: auditPath(payload.path),
+              peer,
+              requestId,
+              upstreamOrigin: (() => {
+                try { return new URL(capability.baseUrl).origin; } catch { return null; }
+              })(),
+              softwareVersion: process.env.npm_package_version || 'unknown',
+            }), timeoutMs, 'Audit dependency timed out');
+          } catch (error) {
+            safeLogger.error('proxy audit failed', { code: 'audit_unavailable', message: error?.message || 'Audit dependency failed' });
+            if (auditRequired) failure = Object.assign(new Error('Audit dependency unavailable'), { statusCode: 503 });
+          }
+        }
         totalInFlight -= 1;
+        const latencyMs = Math.max(0, Date.now() - requestStartedAt);
+        requestLatencyTotalMs += latencyMs;
+        requestLatencyMaxMs = Math.max(requestLatencyMaxMs, latencyMs);
         const remaining = inFlight.get(capability.id) - 1;
         if (remaining > 0) inFlight.set(capability.id, remaining);
         else inFlight.delete(capability.id);
       }
+      if (failure) throw failure;
+      for (const [name, value] of Object.entries(result.headers)) response.setHeader(name, value);
+      response.statusCode = result.status;
+      response.end(result.bytes);
+      safeLogger.info('proxy request', {
+        capabilityId: capability.id,
+        method: payload.method === undefined ? 'GET' : String(payload.method).toUpperCase(),
+        path: auditPath(payload.path),
+        status: result.status,
+      });
     } catch (error) {
-      if (request.aborted || error.clientAborted) return;
-      const status = Number.isInteger(error.statusCode) ? error.statusCode : 500;
-      if (status >= 500) logger.error?.('proxy request failed', { status, code: publicErrorCode(status) });
-      const close = Boolean(error.closeConnection) || !request.readableEnded;
+      if (request.aborted || error?.clientAborted) return;
+      const status = Number.isInteger(error?.statusCode) ? error.statusCode : 500;
+      if (status >= 500) {
+        upstreamErrorsTotal += status === 502 ? 1 : 0;
+        safeLogger.error('proxy request failed', { status, code: publicErrorCode(status) });
+      }
+      const close = Boolean(error?.closeConnection) || !request.readableEnded;
       if (close) closeResponse(response, request, status, { error: publicErrorCode(status) });
       else if (!response.headersSent) jsonResponse(response, status, { error: publicErrorCode(status) });
       else response.end();
     }
   });
 
-  server.on('error', (error) => logger.error?.('broker server error', { message: error.message }));
-  server.on('clientError', (error, socket) => {
-    logger.warn?.('broker client error', { message: error.message });
+  server.on('error', (error) => safeLogger.error('broker server error', { errorName: error?.name || 'Error' }));
+  server.on('clientError', (_error, socket) => {
+    safeLogger.warn('broker client error', { code: 'client_protocol_error' });
     if (socket.writable) socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n');
   });
   server.requestTimeout = timeoutMs;
@@ -619,6 +796,7 @@ export function createBrokerServer({
   server.keepAliveTimeout = 5_000;
   server.headersTimeout = Math.max(timeoutMs, 5_000);
   server.maxHeadersCount = 100;
+  let closePromise;
   return {
     server,
     listen() {
@@ -637,17 +815,38 @@ export function createBrokerServer({
       });
     },
     close() {
-      return new Promise((resolve, reject) => {
+      if (closePromise) return closePromise;
+      closePromise = new Promise((resolve, reject) => {
+        const finish = () => {
+          if (!server.listening) {
+            eventLoopDelay.disable();
+            resolve();
+            return;
+          }
+          server.close((error) => {
+            eventLoopDelay.disable();
+            if (error) reject(error);
+            else resolve();
+          });
+        };
         const deadline = Date.now() + Math.max(timeoutMs + 5_000, 10_000);
         const drain = () => {
-          if (totalInFlight === 0 || Date.now() >= deadline) {
-            server.close((error) => error ? reject(error) : resolve());
+          if (totalInFlight === 0) {
+            finish();
+            return;
+          }
+          if (Date.now() >= deadline) {
+            // Do not wait forever on a client that holds a socket open after
+            // the bounded upstream/request deadline has elapsed.
+            server.closeAllConnections?.();
+            finish();
             return;
           }
           setTimeout(drain, 25).unref?.();
         };
         drain();
       });
+      return closePromise;
     },
   };
 }
