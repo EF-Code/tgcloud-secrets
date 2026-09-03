@@ -58,8 +58,11 @@ test('pg-store: capability scoped and resolves with PgStore', async () => {
       baseUrl: 'https://api.example.com',
       pathPrefix: '/v1/',
       methods: ['GET'],
-      expiresAt: new Date(Date.now() - 1000).toISOString(),
     });
+    await store._withTenantTransaction((client) => client.query(
+      `UPDATE capabilities SET expires_at=now() - interval '1 second' WHERE id=$1`,
+      [cap2.id],
+    ));
     const resolved2 = await store.resolveCapability(cap2.token);
     assert.equal(resolved2, null);
     // Revoke
@@ -167,6 +170,35 @@ test('pg-store: enables TLS for private non-loopback database hosts', () => {
   assert.equal(localStore.pool.options.ssl, false);
 });
 
+test('pg-store: direct production construction fails closed on local or insecure configuration', () => {
+  const previousEnvironment = process.env.TGCLOUD_ENV;
+  const previousNodeEnvironment = process.env.NODE_ENV;
+  process.env.TGCLOUD_ENV = 'production';
+  delete process.env.NODE_ENV;
+  try {
+    assert.throws(() => new PgStore({
+      dsn: 'postgres://runtime:password@db.internal:5432/tgcloud?sslmode=verify-full',
+      kmsProvider: new LocalKMSProvider({ masterKey: generateMasterKey(), keyId: 'local' }),
+      autoProvisionTenant: false,
+    }), /managed KMS/);
+    assert.throws(() => new PgStore({
+      dsn: 'postgres://runtime:password@db.internal:5432/tgcloud?sslmode=require',
+      kmsKeyId: 'arn:aws:kms:us-east-1:123456789012:key/example',
+      autoProvisionTenant: false,
+    }), /sslmode/);
+    assert.throws(() => new PgStore({
+      dsn: 'postgres://runtime:password@127.0.0.1:5432/tgcloud?sslmode=verify-full',
+      kmsKeyId: 'arn:aws:kms:us-east-1:123456789012:key/example',
+      autoProvisionTenant: false,
+    }), /managed\/private Postgres/);
+  } finally {
+    if (previousEnvironment === undefined) delete process.env.TGCLOUD_ENV;
+    else process.env.TGCLOUD_ENV = previousEnvironment;
+    if (previousNodeEnvironment === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = previousNodeEnvironment;
+  }
+});
+
 test('pg-store: honors an explicitly supplied AWS KMS key id', async () => {
   const store = new PgStore({ dsn, kmsKeyId: 'arn:aws:kms:us-east-1:123456789012:key/example' });
   try {
@@ -174,6 +206,30 @@ test('pg-store: honors an explicitly supplied AWS KMS key id', async () => {
     assert.equal(kms.getKeyId(), 'arn:aws:kms:us-east-1:123456789012:key/example');
   } finally {
     await store.close().catch(() => {});
+  }
+});
+
+test('pg-store: refuses a tenant KMS key mismatch instead of silently creating mixed ciphertext', async () => {
+  const orgId = `org_kms_mismatch_${Date.now()}`;
+  const projectId = `proj_kms_mismatch_${Date.now()}`;
+  const first = new PgStore({
+    dsn,
+    kmsProvider: new LocalKMSProvider({ masterKey: generateMasterKey(), keyId: 'local-primary' }),
+    orgId,
+    projectId,
+  });
+  const second = new PgStore({
+    dsn,
+    kmsProvider: new LocalKMSProvider({ masterKey: generateMasterKey(), keyId: 'local-secondary' }),
+    orgId,
+    projectId,
+  });
+  try {
+    await first.init();
+    await assert.rejects(() => second.init(), /does not match the provisioned tenant key/);
+  } finally {
+    await first.close().catch(() => {});
+    await second.close().catch(() => {});
   }
 });
 
