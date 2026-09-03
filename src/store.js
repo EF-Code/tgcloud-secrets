@@ -1,6 +1,8 @@
-import { chmod, link, mkdir, open, readFile, rename, writeFile, lstat, unlink, readdir } from 'node:fs/promises';
-import { join } from 'node:path';
+import { constants } from 'node:fs';
+import { link, mkdir, open, rename, lstat, unlink, readdir } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
+import { parseStrictJson } from './json.js';
 import {
   capabilityMatches,
   decryptSecret,
@@ -30,6 +32,14 @@ const MAX_SECRET_BYTES = 8 * 1024;
 const LOCK_TIMEOUT_MS = 5_000;
 const STALE_LOCK_MS = 5 * 60 * 1_000;
 const LOCK_QUARANTINE_PREFIX = '.lock.stale-';
+const MAX_STORE_BYTES = 16 * 1024 * 1024;
+const PRIVATE_READ_FLAGS = process.platform === 'win32'
+  ? 'r'
+  : constants.O_RDONLY | (constants.O_NOFOLLOW || 0);
+
+function openPrivateRead(path) {
+  return open(path, PRIVATE_READ_FLAGS);
+}
 
 async function pathExists(path) {
   try {
@@ -47,31 +57,43 @@ async function ensurePrivateDirectory(path) {
     if (!linfo.isDirectory() || linfo.isSymbolicLink()) {
       throw new Error(`Refusing to use a non-directory data path: ${path}`);
     }
-    const handle = await open(path, 'r');
+    const handle = await openPrivateRead(path);
     try {
       const info = await handle.stat();
       // TOCTOU: verify fd and path are same inode (O_NOFOLLOW equivalent) — for dirs check dev/ino
       const same = linfo.dev === info.dev && linfo.ino === info.ino && !linfo.isSymbolicLink() && !info.isSymbolicLink();
       if (!same) throw new Error(`Refusing to use a non-regular secret file (race): ${path}`);
       assertCurrentUserOwnership(info, path);
-      if ((info.mode & 0o077) !== 0) await handle.chmod(0o700);
+      if ((info.mode & 0o077) !== 0) {
+        await handle.chmod(0o700);
+        await handle.sync();
+        await syncDirectory(path);
+      }
     } finally {
       await handle.close().catch(() => {});
     }
   } else {
     await mkdir(path, { recursive: true, mode: 0o700 });
+    await assertExistingPrivateDirectory(path);
   }
 }
 
 async function writePrivateFile(path, contents) {
   const temporary = `${path}.tmp-${process.pid}-${randomBytes(6).toString('hex')}`;
+  let handle;
   let renamed = false;
   try {
-    await writeFile(temporary, contents, { mode: 0o600, flag: 'wx' });
-    await chmod(temporary, 0o600);
+    handle = await open(temporary, 'wx', 0o600);
+    await handle.writeFile(contents);
+    await handle.chmod(0o600);
+    await handle.sync();
+    await handle.close();
+    handle = undefined;
     await rename(temporary, path);
+    await syncDirectory(dirname(path));
     renamed = true;
   } finally {
+    if (handle) await handle.close().catch(() => {});
     if (!renamed) await unlink(temporary).catch(() => {});
   }
 }
@@ -89,9 +111,23 @@ async function createPrivateFile(path, contents) {
     // link() installs the fully-written file without rename's overwrite
     // semantics. A competing initializer gets EEXIST and keeps its file.
     await link(temporary, path);
+    await syncDirectory(dirname(path));
   } finally {
     if (handle) await handle.close().catch(() => {});
     await unlink(temporary).catch(() => {});
+  }
+}
+
+async function syncDirectory(path) {
+  // Windows does not support opening a directory for fsync in the same way as
+  // POSIX filesystems. The normal file sync still provides the useful local
+  // guarantee there; production durable stores are expected to run on POSIX.
+  if (process.platform === 'win32') return;
+  const handle = await openPrivateRead(path);
+  try {
+    await handle.sync();
+  } finally {
+    await handle.close().catch(() => {});
   }
 }
 
@@ -100,12 +136,63 @@ async function ensurePrivateFile(path) {
   if (!linfo.isFile() || linfo.isSymbolicLink()) {
     throw new Error(`Refusing to use a non-regular secret file: ${path}`);
   }
-  const handle = await open(path, 'r');
+  const handle = await openPrivateRead(path);
   try {
     const info = await handle.stat();
     if (!sameFileIdentity(linfo, info)) throw new Error(`Refusing to use a non-regular secret file (race): ${path}`);
     assertCurrentUserOwnership(info, path);
-    if ((info.mode & 0o077) !== 0) await handle.chmod(0o600);
+    if ((info.mode & 0o077) !== 0) {
+      await handle.chmod(0o600);
+      await handle.sync();
+      await syncDirectory(dirname(path));
+    }
+  } finally {
+    await handle.close().catch(() => {});
+  }
+}
+
+async function assertExistingPrivateDirectory(path) {
+  const info = await lstat(path);
+  if (!info.isDirectory() || info.isSymbolicLink()) throw new Error(`Refusing to use a non-directory data path: ${path}`);
+  assertCurrentUserOwnership(info, path);
+  if ((info.mode & 0o077) !== 0) throw new Error(`Secret data directory must be private: ${path}`);
+}
+
+async function assertExistingPrivateFile(path) {
+  const info = await lstat(path);
+  if (!info.isFile() || info.isSymbolicLink()) throw new Error(`Refusing to use a non-regular secret file: ${path}`);
+  assertCurrentUserOwnership(info, path);
+  if ((info.mode & 0o077) !== 0) throw new Error(`Secret file must be private: ${path}`);
+}
+
+async function readPrivateFile(path, maximumBytes) {
+  const observed = await lstat(path);
+  if (!observed.isFile() || observed.isSymbolicLink()) throw new Error(`Refusing to use a non-regular secret file: ${path}`);
+  assertCurrentUserOwnership(observed, path);
+  if ((observed.mode & 0o077) !== 0) throw new Error(`Secret file must be private: ${path}`);
+  if (maximumBytes !== undefined && observed.size > maximumBytes) throw new Error(`Secret file is too large: ${path}`);
+  const handle = await openPrivateRead(path);
+  try {
+    const actual = await handle.stat();
+    if (!sameFileIdentity(observed, actual)) throw new Error(`Refusing to use a replaced secret file: ${path}`);
+    assertCurrentUserOwnership(actual, path);
+    if ((actual.mode & 0o077) !== 0) throw new Error(`Secret file must be private: ${path}`);
+    if (maximumBytes !== undefined && actual.size > maximumBytes) throw new Error(`Secret file is too large: ${path}`);
+    const readLimit = maximumBytes === undefined ? MAX_STORE_BYTES : maximumBytes;
+    if (actual.size > readLimit) throw new Error(`Secret file is too large: ${path}`);
+    const buffer = Buffer.alloc(readLimit);
+    let bytesRead = 0;
+    while (bytesRead < buffer.length) {
+      const result = await handle.read(buffer, bytesRead, buffer.length - bytesRead, bytesRead);
+      if (result.bytesRead === 0) break;
+      bytesRead += result.bytesRead;
+    }
+    const final = await handle.stat();
+    if (!sameFileIdentity(observed, final)) throw new Error(`Refusing to use a replaced secret file: ${path}`);
+    assertCurrentUserOwnership(final, path);
+    if ((final.mode & 0o077) !== 0) throw new Error(`Secret file must be private: ${path}`);
+    if (final.size > readLimit || final.size !== bytesRead) throw new Error(`Secret file changed while being read: ${path}`);
+    return buffer.subarray(0, bytesRead);
   } finally {
     await handle.close().catch(() => {});
   }
@@ -128,17 +215,33 @@ function sameFileIdentity(left, right) {
 function assertLockFile(info, path) {
   if (!info.isFile() || info.isSymbolicLink()) throw new Error(`Refusing to use an unsafe lock path: ${path}`);
   assertCurrentUserOwnership(info, path);
+  if ((info.mode & 0o077) !== 0) throw new Error(`Secret lock must be private: ${path}`);
 }
 
 function isProcessAlive(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return false;
-  // pid 1 is init, never a tgcloud-secrets worker — treat as not alive for stale lock purposes
-  if (pid === 1) return false;
   try {
     process.kill(pid, 0);
     return true;
   } catch (error) {
     return error.code === 'EPERM';
+  }
+}
+
+async function readLockOwner(path) {
+  try {
+    const parsed = parseStrictJson(await readPrivateFile(path, 1_024), {
+      maxBytes: 1_024,
+      maxDepth: 3,
+      maxFields: 8,
+      maxArrayItems: 4,
+      maxStringBytes: 256,
+    });
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) && Number.isSafeInteger(parsed.pid)
+      ? parsed.pid
+      : undefined;
+  } catch {
+    return undefined;
   }
 }
 
@@ -168,12 +271,7 @@ async function reclaimStaleLock(lockPath, expectedIdentity) {
 
   try {
     const current = await lstat(quarantinePath);
-    let owner;
-    try {
-      owner = JSON.parse(await readFile(quarantinePath, 'utf8')).pid;
-    } catch {
-      owner = undefined;
-    }
+    const owner = await readLockOwner(quarantinePath);
     const stillStale = Date.now() - current.mtimeMs > STALE_LOCK_MS;
     if (sameFileIdentity(current, expectedIdentity) && stillStale && !isProcessAlive(owner)) {
       await unlink(quarantinePath);
@@ -205,12 +303,7 @@ async function reapDeadLockQuarantines(dataDir) {
       const info = await lstat(quarantinePath);
       assertLockFile(info, quarantinePath);
       if (Date.now() - info.mtimeMs <= STALE_LOCK_MS) continue;
-      let owner;
-      try {
-        owner = JSON.parse(await readFile(quarantinePath, 'utf8')).pid;
-      } catch {
-        owner = undefined;
-      }
+      const owner = await readLockOwner(quarantinePath);
       if (!isProcessAlive(owner)) await reclaimStaleLock(quarantinePath, info);
     } catch (error) {
       if (error.code !== 'ENOENT') throw error;
@@ -242,11 +335,29 @@ function emptyStore() {
   return { version: STORE_VERSION, secrets: {}, capabilities: {} };
 }
 
+function validateStoredSecret(candidate) {
+  if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)
+    || typeof candidate.updatedAt !== 'string') return false;
+  const keys = Object.keys(candidate);
+  if (keys.length !== 2 || !keys.includes('encrypted') || !keys.includes('updatedAt')
+    || Number.isNaN(new Date(candidate.updatedAt).getTime())) return false;
+  const record = candidate.encrypted;
+  return Boolean(record && typeof record === 'object' && !Array.isArray(record)
+    && record.version === 2
+    && record.algorithm === 'aes-256-gcm'
+    && typeof record.iv === 'string'
+    && typeof record.tag === 'string'
+    && typeof record.ciphertext === 'string');
+}
+
 function validateStoredCapability(candidate) {
+  if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) return false;
   if (typeof candidate.id !== 'string' || !CAPABILITY_ID.test(candidate.id)) return false;
-  if (typeof candidate.secretName !== 'string' || !SECRET_NAME.test(candidate.secretName)) return false;
+  if (typeof candidate.secretName !== 'string' || !SECRET_NAME.test(candidate.secretName)
+    || ['__proto__', 'constructor', 'prototype'].includes(candidate.secretName)) return false;
   if (typeof candidate.allowHttp !== 'boolean') return false;
-  if (typeof candidate.tokenHash !== 'string') return false;
+  if (typeof candidate.tokenHash !== 'string' || !/^[a-f0-9]{64}$/.test(candidate.tokenHash)) return false;
+  if (typeof candidate.metadataMac !== 'string' || !/^[a-f0-9]{64}$/.test(candidate.metadataMac)) return false;
   try {
     if (normalizeBaseUrl(candidate.baseUrl, { allowHttp: candidate.allowHttp }) !== candidate.baseUrl) return false;
     if (normalizePathPrefix(candidate.pathPrefix) !== candidate.pathPrefix) return false;
@@ -291,7 +402,7 @@ export class SecretStore {
   }
 
   async _masterKey() {
-    const raw = (await readFile(this.masterKeyPath, 'utf8')).trim();
+    const raw = (await readPrivateFile(this.masterKeyPath, 1_024)).toString('utf8').trim();
     const diskKey = parseMasterKey(raw);
     if (this.suppliedMasterKey !== undefined) {
       const suppliedKey = parseMasterKey(this.suppliedMasterKey);
@@ -300,12 +411,22 @@ export class SecretStore {
     return diskKey;
   }
 
-  async _readStore() {
-    await this.init();
-    const raw = await readFile(this.storePath, 'utf8');
+  async _readStore({ initialize = true } = {}) {
+    if (initialize) await this.init();
+    else {
+      // Dry-run callers must not create directories, keys, stores, or repair
+      // permissions. Read-only validation still rejects symlinks and foreign
+      // ownership before any data is parsed.
+      await assertExistingPrivateDirectory(this.dataDir);
+      await assertExistingPrivateFile(this.masterKeyPath);
+      await assertExistingPrivateFile(this.storePath);
+      await this._masterKey();
+    }
+    const raw = await readPrivateFile(this.storePath, MAX_STORE_BYTES);
+    if (raw.byteLength > MAX_STORE_BYTES) throw new Error(`Secret store is too large: ${this.storePath}`);
     let parsed;
     try {
-      parsed = JSON.parse(raw);
+      parsed = parseStrictJson(raw, { maxBytes: MAX_STORE_BYTES, maxDepth: 20, maxFields: 100_000, maxArrayItems: 10_000, maxStringBytes: MAX_STORE_BYTES });
     } catch {
       throw new Error(`Secret store is not valid JSON: ${this.storePath}`);
     }
@@ -323,17 +444,21 @@ export class SecretStore {
     if (secretsProto !== Object.prototype || capsProto !== Object.prototype) {
       throw new Error('Unsupported secret store format: prototype pollution');
     }
-    for (const key of [...Object.getOwnPropertyNames(parsed.secrets), ...Object.getOwnPropertyNames(parsed.capabilities)]) {
-      if (key === '__proto__' || key === 'constructor' || key === 'prototype') {
-        throw new Error('Unsupported secret store format: reserved key');
+    for (const [key, value] of Object.entries(parsed.secrets)) {
+      if (!SECRET_NAME.test(key) || key === '__proto__' || key === 'constructor' || key === 'prototype' || !validateStoredSecret(value)) {
+        throw new Error(`Unsupported secret store format: invalid secret ${key}`);
       }
-      // Also reject any key that is not a valid secret or capability id but is present
-      if (!SECRET_NAME.test(key) && !CAPABILITY_ID.test(key)) {
-        // If it's an own property with invalid name, treat as tampered
-        throw new Error(`Unsupported secret store format: invalid key ${key}`);
+    }
+    for (const [key, value] of Object.entries(parsed.capabilities)) {
+      if (!CAPABILITY_ID.test(key) || !validateStoredCapability(value) || value.id !== key) {
+        throw new Error(`Unsupported secret store format: invalid capability ${key}`);
       }
     }
     return parsed;
+  }
+
+  async readExisting() {
+    return this._readStore({ initialize: false });
   }
 
   async _writeStore(store) {
@@ -392,12 +517,7 @@ export class SecretStore {
           const info = await lstat(lockPath);
           assertLockFile(info, lockPath);
           if (Date.now() - info.mtimeMs > STALE_LOCK_MS) {
-            let lockOwner;
-            try {
-              lockOwner = JSON.parse(await readFile(lockPath, 'utf8')).pid;
-            } catch {
-              lockOwner = undefined;
-            }
+            const lockOwner = await readLockOwner(lockPath);
             if (!isProcessAlive(lockOwner)) await reclaimStaleLock(lockPath, info);
           }
         } catch (lockError) {
