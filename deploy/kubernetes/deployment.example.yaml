@@ -1,0 +1,125 @@
+# Provider-neutral deployment template. Fill in secret-manager references,
+# image digest, ingress policy, replica spread, and approved resource budgets.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tgcloud-secrets-broker
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app: tgcloud-secrets-broker
+  template:
+    metadata:
+      labels:
+        app: tgcloud-secrets-broker
+    spec:
+      serviceAccountName: tgcloud-secrets-broker
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      terminationGracePeriodSeconds: 45
+      containers:
+        - name: broker
+          image: REPLACE_WITH_SIGNED_IMAGE@sha256:REPLACE_WITH_REVIEWED_DIGEST
+          args: ["serve", "--host", "0.0.0.0", "--allow-public"]
+          ports:
+            - name: http
+              containerPort: 8787
+          env:
+            - name: TGCLOUD_ENV
+              value: production
+            - name: TGCLOUD_HOST
+              value: 0.0.0.0
+            - name: TGCLOUD_ORG_ID
+              valueFrom:
+                configMapKeyRef:
+                  name: tgcloud-secrets-tenant
+                  key: org-id
+            - name: TGCLOUD_PROJECT_ID
+              valueFrom:
+                configMapKeyRef:
+                  name: tgcloud-secrets-tenant
+                  key: project-id
+            - name: TGCLOUD_TLS_TERMINATED
+              value: "true"
+            - name: TGCLOUD_EDGE_AUTHENTICATED
+              value: "true"
+            - name: TGCLOUD_DISTRIBUTED_LIMITER
+              value: "true"
+            # Mount a reviewed provider-neutral adapter at this path before start.
+            - name: TGCLOUD_RATE_LIMITER_MODULE
+              value: /app/config/rate-limiter-adapter.mjs
+            - name: TGCLOUD_BROKER_REPLICAS
+              value: "2"
+            - name: TGCLOUD_AUDIT_REQUIRED
+              value: "true"
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: tgcloud-secrets-runtime
+                  key: database-url
+            - name: TGCLOUD_KMS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: tgcloud-secrets-runtime
+                  key: kms-key-id
+            - name: TGCLOUD_HMAC_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: tgcloud-secrets-runtime
+                  key: hmac-key
+            - name: TGCLOUD_HMAC_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: tgcloud-secrets-runtime
+                  key: hmac-key-id
+            - name: TGCLOUD_TRUSTED_PROXY_ADDRESSES
+              valueFrom:
+                configMapKeyRef:
+                  name: tgcloud-secrets-edge
+                  key: trusted-proxy-addresses
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: REPLACE_WITH_APPROVED_REQUEST
+              memory: REPLACE_WITH_APPROVED_REQUEST
+            limits:
+              cpu: REPLACE_WITH_APPROVED_LIMIT
+              memory: REPLACE_WITH_APPROVED_LIMIT
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 15
+            timeoutSeconds: 3
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: tgcloud-secrets-broker
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: tgcloud-secrets-broker

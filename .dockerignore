@@ -1,0 +1,12 @@
+.git
+.github
+node_modules
+coverage
+tests
+.tgcloud-secrets
+.env
+.env.*
+*.log
+CHANGES_DETAILED.md
+PRODUCTION_READINESS_PLAN.md
+LUNA_PRODUCTION_IMPLEMENTATION_PROMPT.md

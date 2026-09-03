@@ -1,0 +1,13 @@
+# Deny-by-default example. Replace namespaces/selectors and add only the
+# approved ingress, Postgres, Redis, KMS endpoint, DNS, and observability paths.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: tgcloud-secrets-broker-default-deny
+spec:
+  podSelector:
+    matchLabels:
+      app: tgcloud-secrets-broker
+  policyTypes: [Ingress, Egress]
+  ingress: []
+  egress: []

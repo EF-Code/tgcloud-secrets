@@ -1,0 +1,56 @@
+# Template only. Do not use this as a complete production topology. Supply
+# secrets from a workload identity/secret manager and put an authenticated TLS
+# ingress in front of the two broker replicas.
+services:
+  broker:
+    build:
+      context: ..
+      args:
+        # Replace with a reviewed immutable Node image digest before release.
+        NODE_IMAGE: ${NODE_IMAGE:?set an immutable reviewed image reference}
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+    user: "1000:1000"
+    cap_drop: ["ALL"]
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    # The broker can buffer up to 30 MiB per response and 32 requests in
+    # flight. Tune this with load evidence; 1 GiB is a conservative template
+    # floor, not an approved final budget.
+    mem_limit: 1g
+    cpus: 1.0
+    restart: unless-stopped
+    command: ["serve", "--host", "0.0.0.0", "--allow-public"]
+    environment:
+      TGCLOUD_ENV: production
+      DATABASE_URL: ${DATABASE_URL:?set through an approved secret delivery mechanism}
+      TGCLOUD_ORG_ID: ${TGCLOUD_ORG_ID:?set the pre-provisioned organization id}
+      TGCLOUD_PROJECT_ID: ${TGCLOUD_PROJECT_ID:?set the pre-provisioned project id}
+      TGCLOUD_KMS_KEY_ID: ${TGCLOUD_KMS_KEY_ID:?set a managed KMS key reference}
+      TGCLOUD_HMAC_KEY: ${TGCLOUD_HMAC_KEY:?set through an approved secret delivery mechanism}
+      TGCLOUD_HMAC_KEY_ID: ${TGCLOUD_HMAC_KEY_ID:?set the active HMAC key id}
+      TGCLOUD_HOST: 0.0.0.0
+      TGCLOUD_TLS_TERMINATED: "true"
+      TGCLOUD_EDGE_AUTHENTICATED: "true"
+      TGCLOUD_DISTRIBUTED_LIMITER: "true"
+      # Mount a reviewed provider-neutral adapter at this path before start.
+      TGCLOUD_RATE_LIMITER_MODULE: ${TGCLOUD_RATE_LIMITER_MODULE:?set the in-container limiter adapter path}
+      TGCLOUD_BROKER_REPLICAS: "2"
+      TGCLOUD_AUDIT_REQUIRED: "true"
+      TGCLOUD_TRUSTED_PROXY_ADDRESSES: ${TGCLOUD_TRUSTED_PROXY_ADDRESSES:?set exact immediate ingress IPs}
+    healthcheck:
+      test: ["CMD", "node", "src/cli.js", "healthcheck"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    networks:
+      - private
+      - ingress
+
+networks:
+  private:
+    internal: true
+  ingress:
+    internal: true
