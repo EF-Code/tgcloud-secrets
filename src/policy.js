@@ -35,6 +35,7 @@ const HOP_BY_HOP_HEADERS = new Set([
 
 const UNSAFE_HEADER_VALUE = /[\u0000-\u0008\u000A-\u000D\u000E-\u001F\u007F]/;
 const UNSAFE_PATH_VALUE = /[\u0000-\u001F\u007F]/;
+const HEADER_NAME = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]{1,256}$/;
 
 export function isSafeHeaderValue(value) {
   return typeof value === 'string'
@@ -193,8 +194,9 @@ export function resolveUpstreamUrl(baseUrl, requestPath, pathPrefix) {
 }
 
 export function normalizeInjectHeader(value = 'authorization') {
-  const header = String(value).trim().toLowerCase();
-  if (!/^[a-z0-9!#$%&'*+.^_`|~-]+$/.test(header)) {
+  if (typeof value !== 'string') throw new Error('Injection header must be a string');
+  const header = value.trim().toLowerCase();
+  if (!HEADER_NAME.test(header)) {
     throw new Error('Injection header is not a valid HTTP header name');
   }
   if (HOP_BY_HOP_HEADERS.has(header) || header.startsWith('x-tgcloud-')) {
@@ -217,17 +219,17 @@ export function sanitizeForwardHeaders(input, injectedHeader) {
   const output = new Headers();
   const entries = input && typeof input === 'object' ? Object.entries(input) : [];
   for (const [name, value] of entries) {
+    if (!HEADER_NAME.test(name)) throw new Error(`Header ${name} has an invalid name`);
     const lower = String(name).toLowerCase();
     if (lower === injectedHeader) {
       throw new Error(`The ${injectedHeader} header is managed by the capability`);
     }
     if (lower === 'x-tgcloud-capability' || HOP_BY_HOP_HEADERS.has(lower)) continue;
-    if (Array.isArray(value) || typeof value === 'object') {
+    if (typeof value !== 'string') {
       throw new Error(`Header ${name} must have a string value`);
     }
-    const stringValue = String(value);
-    if (!isSafeHeaderValue(stringValue)) throw new Error(`Header ${name} contains an unsafe value`);
-    output.set(name, stringValue);
+    if (!isSafeHeaderValue(value)) throw new Error(`Header ${name} contains an unsafe value`);
+    output.set(name, value);
   }
   return output;
 }

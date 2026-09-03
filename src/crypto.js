@@ -18,8 +18,14 @@ function encode(bytes) {
   return Buffer.from(bytes).toString('base64url');
 }
 
-function decode(value) {
-  return Buffer.from(value, 'base64url');
+function decode(value, label = 'Encoded value', { allowEmpty = false, maxBytes = Number.MAX_SAFE_INTEGER } = {}) {
+  if (typeof value !== 'string' || value.length > Math.ceil(maxBytes * 4 / 3) + 4
+    || (!allowEmpty && value.length === 0) || !/^[A-Za-z0-9_-]*$/.test(value)) {
+    throw new Error(`${label} is invalid`);
+  }
+  const decoded = Buffer.from(value, 'base64url');
+  if (decoded.length > maxBytes || encode(decoded) !== value) throw new Error(`${label} is invalid`);
+  return decoded;
 }
 
 function secretAssociatedData(secretName) {
@@ -56,8 +62,8 @@ export function parseMasterKey(value) {
     throw new Error('Master key must be a 32-byte base64url string');
   }
 
-  const key = decode(value);
-  if (key.length !== KEY_BYTES) {
+  const key = decode(value, 'Master key', { maxBytes: KEY_BYTES });
+  if (key.length !== KEY_BYTES || encode(key) !== value) {
     throw new Error('Master key must be a 32-byte base64url string');
   }
   return key;
@@ -86,9 +92,16 @@ export function decryptSecret(record, key, secretName) {
   if (typeof record.iv !== 'string' || typeof record.tag !== 'string' || typeof record.ciphertext !== 'string') {
     throw new Error('Unsupported encrypted secret record');
   }
-  const iv = decode(record.iv);
-  const tag = decode(record.tag);
-  const ciphertext = decode(record.ciphertext);
+  let iv;
+  let tag;
+  let ciphertext;
+  try {
+    iv = decode(record.iv, 'Encrypted secret IV', { maxBytes: IV_BYTES });
+    tag = decode(record.tag, 'Encrypted secret authentication tag', { maxBytes: 16 });
+    ciphertext = decode(record.ciphertext, 'Encrypted secret ciphertext', { allowEmpty: true, maxBytes: MAX_ENCRYPTED_SECRET_BYTES });
+  } catch {
+    throw new Error('Unsupported encrypted secret record');
+  }
   if (iv.length !== IV_BYTES || tag.length !== 16 || ciphertext.length > MAX_ENCRYPTED_SECRET_BYTES) {
     throw new Error('Unsupported encrypted secret record');
   }
@@ -101,7 +114,7 @@ export function decryptSecret(record, key, secretName) {
       decipher.update(ciphertext),
       decipher.final(),
     ]);
-    return plaintext.toString('utf8');
+    return new TextDecoder('utf-8', { fatal: true }).decode(plaintext);
   } catch {
     throw new Error('Unsupported encrypted secret record');
   }
@@ -131,9 +144,16 @@ export function decryptSecretWithDEK(record, dek, secretName, orgId, projectId) 
   if (typeof record.iv !== 'string' || typeof record.tag !== 'string' || typeof record.ciphertext !== 'string') {
     throw new Error('Unsupported encrypted secret record');
   }
-  const iv = decode(record.iv);
-  const tag = decode(record.tag);
-  const ciphertext = decode(record.ciphertext);
+  let iv;
+  let tag;
+  let ciphertext;
+  try {
+    iv = decode(record.iv, 'Encrypted secret IV', { maxBytes: IV_BYTES });
+    tag = decode(record.tag, 'Encrypted secret authentication tag', { maxBytes: 16 });
+    ciphertext = decode(record.ciphertext, 'Encrypted secret ciphertext', { allowEmpty: true, maxBytes: MAX_ENCRYPTED_SECRET_BYTES });
+  } catch {
+    throw new Error('Unsupported encrypted secret record');
+  }
   if (iv.length !== IV_BYTES || tag.length !== 16 || ciphertext.length > MAX_ENCRYPTED_SECRET_BYTES) {
     throw new Error('Unsupported encrypted secret record');
   }
@@ -142,7 +162,7 @@ export function decryptSecretWithDEK(record, dek, secretName, orgId, projectId) 
   decipher.setAuthTag(tag);
   try {
     const plaintext = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
-    return plaintext.toString('utf8');
+    return new TextDecoder('utf-8', { fatal: true }).decode(plaintext);
   } catch {
     throw new Error('Unsupported encrypted secret record');
   }
@@ -155,6 +175,7 @@ export function encryptSecretEnvelope(value, dek, secretName, { orgId, projectId
     version: ENCRYPTED_SECRET_VERSION_V3,
     algorithm: ALGORITHM,
     keyId: String(keyId || 'local'),
+    kmsContextVersion: 1,
     iv: enc.iv,
     tag: enc.tag,
     ciphertext: enc.ciphertext,
