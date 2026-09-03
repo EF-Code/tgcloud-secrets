@@ -1,0 +1,1 @@
+ALTER TABLE capabilities ADD COLUMN IF NOT EXISTS mutation_version INT NOT NULL DEFAULT 1;
