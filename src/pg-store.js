@@ -211,15 +211,14 @@ function assertProductionPgStoreConfig(connectionString, usesLocalKms) {
     throw new Error('Production PgStore requires database sslmode=verify-ca or sslmode=verify-full');
   }
   let username;
-  let password;
   try {
     username = decodeURIComponent(parsed.username);
-    password = decodeURIComponent(parsed.password);
+    decodeURIComponent(parsed.password);
   } catch {
     throw new Error('Production PgStore DSN credentials are malformed');
   }
-  if (username === 'postgres' && password === 'postgres') {
-    throw new Error('Default Postgres credentials are not allowed in production');
+  if (username === 'postgres') {
+    throw new Error('The PostgreSQL superuser identity is not allowed for the production runtime');
   }
 }
 

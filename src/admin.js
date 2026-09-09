@@ -98,8 +98,18 @@ async function readBody(request, { timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS } = {}
   return { parsed, raw };
 }
 
-function requestHash(raw) {
-  return createHash('sha256').update(raw).digest('hex');
+function requestHash(request, pathname, raw) {
+  // An idempotency key identifies one complete operation, not merely a JSON
+  // document. Without the method and route in this digest, the same key/body
+  // could replay a response from a different secret or capability target and
+  // silently skip the requested mutation.
+  return createHash('sha256')
+    .update(request.method || '')
+    .update('\0')
+    .update(pathname)
+    .update('\0')
+    .update(raw)
+    .digest('hex');
 }
 
 function idempotencyKey(request) {
@@ -463,7 +473,7 @@ export function createAdminServer({
         : { orgId, projectId, action: target.action, target: target.name || target.id || body.name || body.secretName || null, destructive, approvedBy: principal.approvedBy };
       await authorizeRequest(principal, permission, resource);
       const key = idempotencyKey(request);
-      const hash = requestHash(raw);
+      const hash = requestHash(request, url.pathname, raw);
       const result = await store.runIdempotent({ idempotencyKey: key, requestHash: hash, orgId, projectId, mutation: async (client) => {
         let value;
         if (target.action === 'secret') {

@@ -185,3 +185,8 @@ test('isLoopbackHost handles 127.000.0.1', async () => {
   const { isLoopbackHost } = await import('../src/policy.js');
   assert.equal(isLoopbackHost('127.000.0.1'), true);
 });
+
+test('SSRF policy rejects the IETF protocol-assignment IPv4 range', () => {
+  assert.equal(isPrivateHost('192.0.0.1'), true);
+  assert.equal(isPrivateHost('192.0.0.170'), true);
+});

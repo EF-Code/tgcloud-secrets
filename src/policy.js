@@ -271,6 +271,7 @@ function isPrivateIpv4(hostname) {
     || (first === 100 && second >= 64 && second <= 127)
     || (first === 169 && second === 254)
     || (first === 172 && second >= 16 && second <= 31)
+    || (first === 192 && second === 0 && third === 0)
     || (first === 192 && second === 0 && third === 2)
     || (first === 192 && second === 88 && third === 99)
     || (first === 192 && second === 168)
@@ -350,6 +351,3 @@ function isPrivateEmbeddedIpv4(hextets, index) {
 }
 
 export { HOP_BY_HOP_HEADERS };
-
-// isLoopbackHost now handles 127.000.0.1 via URL normalization
-// 2001:db8::/32 now treated as private (doc net)

@@ -44,8 +44,6 @@ function secretAssociatedDataV3(secretName, orgId, projectId) {
   return Buffer.from(`tgcloud-secrets/v3/${org}/${proj}/${secretName}`, 'utf8');
 }
 
-// dekAssociatedData moved to src/kms.js (LocalKMSProvider) — kept for reference but not used here
-
 export function generateMasterKey() {
   return randomBytes(KEY_BYTES);
 }
@@ -70,19 +68,25 @@ export function parseMasterKey(value) {
 }
 
 export function encryptSecret(value, key, secretName) {
-  const plaintext = Buffer.from(String(value), 'utf8');
-  const iv = randomBytes(IV_BYTES);
-  const cipher = createCipheriv(ALGORITHM, parseMasterKey(key), iv);
-  cipher.setAAD(secretAssociatedData(secretName));
-  const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
-
-  return {
-    version: ENCRYPTED_SECRET_VERSION,
-    algorithm: ALGORITHM,
-    iv: encode(iv),
-    tag: encode(cipher.getAuthTag()),
-    ciphertext: encode(ciphertext),
-  };
+  const parsedKey = parseMasterKey(key);
+  let plaintext;
+  try {
+    plaintext = Buffer.from(String(value), 'utf8');
+    const iv = randomBytes(IV_BYTES);
+    const cipher = createCipheriv(ALGORITHM, parsedKey, iv);
+    cipher.setAAD(secretAssociatedData(secretName));
+    const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+    return {
+      version: ENCRYPTED_SECRET_VERSION,
+      algorithm: ALGORITHM,
+      iv: encode(iv),
+      tag: encode(cipher.getAuthTag()),
+      ciphertext: encode(ciphertext),
+    };
+  } finally {
+    plaintext?.fill(0);
+    parsedKey.fill(0);
+  }
 }
 
 export function decryptSecret(record, key, secretName) {
@@ -106,17 +110,22 @@ export function decryptSecret(record, key, secretName) {
     throw new Error('Unsupported encrypted secret record');
   }
 
-  const decipher = createDecipheriv(ALGORITHM, parseMasterKey(key), iv);
-  decipher.setAAD(secretAssociatedData(secretName));
-  decipher.setAuthTag(tag);
+  const parsedKey = parseMasterKey(key);
+  let plaintext;
   try {
-    const plaintext = Buffer.concat([
+    const decipher = createDecipheriv(ALGORITHM, parsedKey, iv);
+    decipher.setAAD(secretAssociatedData(secretName));
+    decipher.setAuthTag(tag);
+    plaintext = Buffer.concat([
       decipher.update(ciphertext),
       decipher.final(),
     ]);
     return new TextDecoder('utf-8', { fatal: true }).decode(plaintext);
   } catch {
     throw new Error('Unsupported encrypted secret record');
+  } finally {
+    plaintext?.fill(0);
+    parsedKey.fill(0);
   }
 }
 
@@ -125,16 +134,23 @@ export function generateDEK() {
 }
 
 export function encryptSecretWithDEK(value, dek, secretName, orgId, projectId) {
-  const plaintext = Buffer.from(String(value), 'utf8');
-  const iv = randomBytes(IV_BYTES);
-  const cipher = createCipheriv(ALGORITHM, parseMasterKey(dek), iv);
-  cipher.setAAD(secretAssociatedDataV3(secretName, orgId, projectId));
-  const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
-  return {
-    iv: encode(iv),
-    tag: encode(cipher.getAuthTag()),
-    ciphertext: encode(ciphertext),
-  };
+  const parsedKey = parseMasterKey(dek);
+  let plaintext;
+  try {
+    plaintext = Buffer.from(String(value), 'utf8');
+    const iv = randomBytes(IV_BYTES);
+    const cipher = createCipheriv(ALGORITHM, parsedKey, iv);
+    cipher.setAAD(secretAssociatedDataV3(secretName, orgId, projectId));
+    const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+    return {
+      iv: encode(iv),
+      tag: encode(cipher.getAuthTag()),
+      ciphertext: encode(ciphertext),
+    };
+  } finally {
+    plaintext?.fill(0);
+    parsedKey.fill(0);
+  }
 }
 
 export function decryptSecretWithDEK(record, dek, secretName, orgId, projectId) {
@@ -157,14 +173,19 @@ export function decryptSecretWithDEK(record, dek, secretName, orgId, projectId) 
   if (iv.length !== IV_BYTES || tag.length !== 16 || ciphertext.length > MAX_ENCRYPTED_SECRET_BYTES) {
     throw new Error('Unsupported encrypted secret record');
   }
-  const decipher = createDecipheriv(ALGORITHM, parseMasterKey(dek), iv);
-  decipher.setAAD(secretAssociatedDataV3(secretName, orgId, projectId));
-  decipher.setAuthTag(tag);
+  const parsedKey = parseMasterKey(dek);
+  let plaintext;
   try {
-    const plaintext = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+    const decipher = createDecipheriv(ALGORITHM, parsedKey, iv);
+    decipher.setAAD(secretAssociatedDataV3(secretName, orgId, projectId));
+    decipher.setAuthTag(tag);
+    plaintext = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
     return new TextDecoder('utf-8', { fatal: true }).decode(plaintext);
   } catch {
     throw new Error('Unsupported encrypted secret record');
+  } finally {
+    plaintext?.fill(0);
+    parsedKey.fill(0);
   }
 }
 
@@ -221,7 +242,12 @@ function capabilityMetadata(capability) {
 }
 
 export function hashCapabilityMetadata(capability, key) {
-  return createHmac('sha256', parseMasterKey(key)).update(capabilityMetadata(capability), 'utf8').digest('hex');
+  const parsedKey = parseMasterKey(key);
+  try {
+    return createHmac('sha256', parsedKey).update(capabilityMetadata(capability), 'utf8').digest('hex');
+  } finally {
+    parsedKey.fill(0);
+  }
 }
 
 export function capabilityMetadataMatches(capability, key, expectedMac) {
@@ -232,7 +258,10 @@ export function capabilityMetadataMatches(capability, key, expectedMac) {
 }
 
 export function encodeMasterKey(key) {
-  return encode(parseMasterKey(key));
+  const parsedKey = parseMasterKey(key);
+  try {
+    return encode(parsedKey);
+  } finally {
+    parsedKey.fill(0);
+  }
 }
-// dekCiphertext must be string, checked in encryptSecretEnvelope
-// dekCiphertext now throws if missing

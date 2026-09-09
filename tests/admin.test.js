@@ -57,6 +57,20 @@ test('admin control plane authenticates, authorizes, audits, and encrypts idempo
   const conflict = await fetch(`${endpoint}/v1/admin/secrets`, { ...secretOptions, body: JSON.stringify({ name: 'admin_secret', value: 'different' }) });
   assert.equal(conflict.status, 409);
 
+  await store.setSecret('delete_one', 'synthetic-one');
+  await store.setSecret('delete_two', 'synthetic-two');
+  const deleteOptions = {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'idempotency-key': 'target-bound-key-1' },
+    body: '{}',
+  };
+  const firstDelete = await fetch(`${endpoint}/v1/admin/secrets/delete_one/delete`, deleteOptions);
+  assert.equal(firstDelete.status, 200);
+  const crossTargetReplay = await fetch(`${endpoint}/v1/admin/secrets/delete_two/delete`, deleteOptions);
+  assert.equal(crossTargetReplay.status, 409);
+  assert.deepEqual(await crossTargetReplay.json(), { error: 'idempotency_conflict' });
+  assert.equal(await store.getSecret('delete_two'), 'synthetic-two');
+
   const capabilityBody = JSON.stringify({ secretName: 'admin_secret', baseUrl: 'https://api.example.com', methods: ['GET'] });
   const grant = await fetch(`${endpoint}/v1/admin/capabilities`, { method: 'POST', headers: { 'content-type': 'application/json', 'idempotency-key': 'grant-key-1' }, body: capabilityBody });
   assert.equal(grant.status, 201);

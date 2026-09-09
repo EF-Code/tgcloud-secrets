@@ -51,6 +51,7 @@ jobs:
           TGCLOUD_HMAC_KEY="$(node -e "process.stdout.write(require('node:crypto').randomBytes(32).toString('base64url'))")" \
           TGCLOUD_HMAC_KEY_ID=ci-hmac-2026 \
           TGCLOUD_DISTRIBUTED_LIMITER=true \
+          TGCLOUD_RATE_LIMITER_MODULE=/app/config/rate-limiter-adapter.mjs \
           node src/cli.js config-check
       - run: npm run secret-scan
       - run: npm run license-check

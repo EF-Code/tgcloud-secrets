@@ -191,6 +191,11 @@ test('pg-store: direct production construction fails closed on local or insecure
       kmsKeyId: 'arn:aws:kms:us-east-1:123456789012:key/example',
       autoProvisionTenant: false,
     }), /managed\/private Postgres/);
+    assert.throws(() => new PgStore({
+      dsn: 'postgres://postgres:nondefault@db.internal:5432/tgcloud?sslmode=verify-full',
+      kmsKeyId: 'arn:aws:kms:us-east-1:123456789012:key/example',
+      autoProvisionTenant: false,
+    }), /superuser identity/);
   } finally {
     if (previousEnvironment === undefined) delete process.env.TGCLOUD_ENV;
     else process.env.TGCLOUD_ENV = previousEnvironment;

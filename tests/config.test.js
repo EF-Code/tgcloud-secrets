@@ -19,6 +19,7 @@ test('configuration validation accepts an explicit managed, private production p
     TGCLOUD_HOST: '127.0.0.1',
     TGCLOUD_BROKER_REPLICAS: '2',
     TGCLOUD_DISTRIBUTED_LIMITER: 'true',
+    TGCLOUD_RATE_LIMITER_MODULE: '/app/config/rate-limiter-adapter.mjs',
   });
   assert.equal(config.hmacConfigured, true);
   assert.deepEqual(validateProductionConfig(config), []);
@@ -104,4 +105,46 @@ test('configuration does not silently replace explicitly empty security values',
   assert.ok(validateProductionConfig(readConfig({ TGCLOUD_HOST: ' 127.0.0.1' })).some((error) => error.includes('TGCLOUD_HOST')));
   assert.ok(validateProductionConfig(readConfig({ TGCLOUD_RATE_LIMITER_MODULE: '' })).some((error) => error.includes('TGCLOUD_RATE_LIMITER_MODULE')));
   assert.throws(() => readConfig({ TGCLOUD_KMS_OPERATION_TIMEOUT_MS: '' }), /must not be empty/);
+});
+
+test('production configuration requires an actual limiter adapter and valid public proxy boundary', () => {
+  const base = {
+    TGCLOUD_ENV: 'production',
+    DATABASE_URL: 'postgres://runtime:password@db.internal:5432/tgcloud?sslmode=verify-full',
+    TGCLOUD_KMS_KEY_ID: 'arn:aws:kms:us-east-1:123456789012:key/example',
+    TGCLOUD_HMAC_KEY: 'Z5zvyC7Tx4iQbiOrZY6ugPukxdNHisYw6BEoIeh8HNQ',
+    TGCLOUD_HMAC_KEY_ID: 'hmac-2026',
+    TGCLOUD_DISTRIBUTED_LIMITER: 'true',
+  };
+  assert.ok(validateProductionConfig(readConfig(base)).some((error) => error.includes('RATE_LIMITER_MODULE')));
+
+  const publicConfig = {
+    ...base,
+    TGCLOUD_RATE_LIMITER_MODULE: '/app/config/rate-limiter-adapter.mjs',
+    TGCLOUD_HOST: '0.0.0.0',
+    TGCLOUD_TLS_TERMINATED: 'true',
+    TGCLOUD_EDGE_AUTHENTICATED: 'true',
+  };
+  assert.ok(validateProductionConfig(readConfig(publicConfig)).some((error) => error.includes('TRUSTED_PROXY_ADDRESSES')));
+  assert.ok(validateProductionConfig(readConfig({
+    ...publicConfig,
+    TGCLOUD_TRUSTED_PROXY_ADDRESSES: 'not-an-ip',
+  })).some((error) => error.includes('bounded comma-separated')));
+  assert.deepEqual(validateProductionConfig(readConfig({
+    ...publicConfig,
+    TGCLOUD_TRUSTED_PROXY_ADDRESSES: '10.0.0.10,2001:db8::10',
+  })), []);
+});
+
+test('production configuration rejects the PostgreSQL superuser even with a non-default password', () => {
+  const config = readConfig({
+    TGCLOUD_ENV: 'production',
+    DATABASE_URL: 'postgres://postgres:nondefault@db.internal:5432/tgcloud?sslmode=verify-full',
+    TGCLOUD_KMS_KEY_ID: 'arn:aws:kms:us-east-1:123456789012:key/example',
+    TGCLOUD_HMAC_KEY: 'Z5zvyC7Tx4iQbiOrZY6ugPukxdNHisYw6BEoIeh8HNQ',
+    TGCLOUD_HMAC_KEY_ID: 'hmac-2026',
+    TGCLOUD_DISTRIBUTED_LIMITER: 'true',
+    TGCLOUD_RATE_LIMITER_MODULE: '/app/config/rate-limiter-adapter.mjs',
+  });
+  assert.ok(validateProductionConfig(config).some((error) => error.includes('superuser identity')));
 });

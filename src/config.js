@@ -1,3 +1,4 @@
+import { isIP } from 'node:net';
 import { isLoopbackHost } from './policy.js';
 import { parseMasterKey } from './crypto.js';
 import { parseStrictJson } from './json.js';
@@ -59,7 +60,7 @@ function dsnHost(dsn) {
 }
 
 function dsnDetails(dsn) {
-  if (dsn === undefined || dsn === null) return { valid: true, host: null, sslMode: null, sslModeCount: 0, defaultCredentials: false };
+  if (dsn === undefined || dsn === null) return { valid: true, host: null, sslMode: null, sslModeCount: 0, defaultCredentials: false, privilegedUsername: false };
   try {
     const parsed = new URL(dsn);
     const username = decodeURIComponent(parsed.username);
@@ -70,10 +71,20 @@ function dsnDetails(dsn) {
       sslMode: parsed.searchParams.get('sslmode'),
       sslModeCount: parsed.searchParams.getAll('sslmode').length,
       defaultCredentials: username === 'postgres' && password === 'postgres',
+      privilegedUsername: username === 'postgres',
     };
   } catch {
-    return { valid: false, host: null, sslMode: null, sslModeCount: 0, defaultCredentials: false };
+    return { valid: false, host: null, sslMode: null, sslModeCount: 0, defaultCredentials: false, privilegedUsername: false };
   }
+}
+
+function trustedProxyDetails(value) {
+  if (value === undefined) return { configured: false, valid: true, addresses: [] };
+  if (typeof value !== 'string') return { configured: true, valid: false, addresses: [] };
+  const addresses = value.split(',').map((entry) => entry.trim()).filter(Boolean);
+  const valid = addresses.length > 0 && addresses.length <= 256
+    && addresses.every((address) => isIP(address.replace(/^\[|\]$/g, '')) !== 0);
+  return { configured: true, valid, addresses };
 }
 
 function validMasterKey(value) {
@@ -133,6 +144,7 @@ export function readConfig(env = process.env) {
     : (env.AWS_KMS_KEY_ID !== undefined ? env.AWS_KMS_KEY_ID : 'local');
   const localKms = typeof kmsKeyId === 'string' && (kmsKeyId === 'local' || kmsKeyId.startsWith('local:'));
   const dsnInfo = dsnDetails(dsn);
+  const trustedProxies = trustedProxyDetails(env.TGCLOUD_TRUSTED_PROXY_ADDRESSES);
   const hmacConfigured = env.TGCLOUD_HMAC_KEY !== undefined;
   const orgId = env.TGCLOUD_ORG_ID !== undefined ? env.TGCLOUD_ORG_ID : 'default';
   const projectId = env.TGCLOUD_PROJECT_ID !== undefined ? env.TGCLOUD_PROJECT_ID : 'default';
@@ -149,6 +161,7 @@ export function readConfig(env = process.env) {
     dsnSslModeCount: dsnInfo.sslModeCount,
     dsnSourceConflict,
     defaultDsnCredentials: dsnInfo.defaultCredentials,
+    privilegedDsnUsername: dsnInfo.privilegedUsername,
     orgId,
     projectId,
     tenantIdsValid: validTenantId(orgId) && validTenantId(projectId),
@@ -177,6 +190,9 @@ export function readConfig(env = process.env) {
     distributedLimiter: flag(env.TGCLOUD_DISTRIBUTED_LIMITER),
     rateLimiterModule: env.TGCLOUD_RATE_LIMITER_MODULE,
     rateLimiterModuleValid: validRateLimiterModule(env.TGCLOUD_RATE_LIMITER_MODULE),
+    trustedProxyAddresses: trustedProxies.addresses,
+    trustedProxyAddressesConfigured: trustedProxies.configured,
+    trustedProxyAddressesValid: trustedProxies.valid,
     auditRequired: flag(env.TGCLOUD_AUDIT_REQUIRED, true),
     ephemeralKms: flag(env.ALLOW_EPHEMERAL_KMS),
     unknownKeys: Object.keys(env).filter((key) => key.startsWith('TGCLOUD_') && !KNOWN_ENV_KEYS.has(key)),
@@ -194,6 +210,7 @@ function validateCommonConfig(config) {
   if (config.dsn !== null && config.dsn !== undefined && !config.dsnValid) errors.push('DATABASE_URL must be a valid postgres:// or postgresql:// URL');
   if (!config.kmsKeyIdValid) errors.push('KMS key ID must be a non-empty, bounded string without control characters');
   if (!config.rateLimiterModuleValid) errors.push('TGCLOUD_RATE_LIMITER_MODULE must be a non-empty local module path of at most 4096 bytes');
+  if (!config.trustedProxyAddressesValid) errors.push('TGCLOUD_TRUSTED_PROXY_ADDRESSES must contain a bounded comma-separated list of IP addresses');
   if (!config.hostValid) errors.push('TGCLOUD_HOST must be a non-empty host name or IP address without control characters');
   if (config.hmacConfigured && !config.hmacValid) errors.push('TGCLOUD_HMAC_KEY must be a valid 32-byte base64url key');
   if (config.hmacKeyIdConfigured && !config.hmacKeyIdValid) errors.push('TGCLOUD_HMAC_KEY_ID is invalid');
@@ -211,6 +228,7 @@ function appendProductionDatabaseErrors(config, errors) {
   if (config.dsn && config.dsnValid && !config.dsnHost) errors.push('production Postgres DSN must include a managed/private endpoint hostname, not a local socket');
   if (config.dsnHost && isLoopbackHost(config.dsnHost)) errors.push('production Postgres must use a managed/private endpoint with TLS, not loopback');
   if (config.defaultDsnCredentials) errors.push('default Postgres credentials are not allowed in production');
+  if (config.privilegedDsnUsername) errors.push('the PostgreSQL superuser identity is not allowed for the production runtime');
 }
 
 export function validateDatabaseConfig(config = readConfig()) {
@@ -229,6 +247,8 @@ export function validateProductionConfig(config = readConfig()) {
   if (!isLoopbackHost(config.host) && !config.tlsTerminated) errors.push('TGCLOUD_TLS_TERMINATED=true is required for a public broker bind');
   if (!isLoopbackHost(config.host) && !config.edgeAuthenticated) errors.push('TGCLOUD_EDGE_AUTHENTICATED=true is required for a public broker bind');
   if (!config.distributedLimiter) errors.push('TGCLOUD_DISTRIBUTED_LIMITER=true is required in production');
+  if (config.distributedLimiter && !config.rateLimiterModule) errors.push('TGCLOUD_RATE_LIMITER_MODULE is required to provide the production distributed limiter');
+  if (!isLoopbackHost(config.host) && !config.trustedProxyAddressesConfigured) errors.push('TGCLOUD_TRUSTED_PROXY_ADDRESSES is required for a public broker bind');
   if (config.auditRequired && !config.dsn) errors.push('durable audit requires Postgres in production');
   if (!config.auditRequired) errors.push('TGCLOUD_AUDIT_REQUIRED must remain enabled in production');
   if (config.kmsKeyId !== 'local' && !config.dsn) errors.push('a KMS-backed deployment requires Postgres in production');
