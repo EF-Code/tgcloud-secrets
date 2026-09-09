@@ -1,0 +1,109 @@
+name: Publish npm release
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+  id-token: write
+
+concurrency:
+  group: npm-release-${{ github.event.release.tag_name }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: npm
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: tgcloud_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/tgcloud_test
+    steps:
+      - name: Check out release tag
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.0.2
+        with:
+          ref: ${{ github.event.release.tag_name }}
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.3.0
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - name: Verify release identity
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_PRERELEASE: ${{ github.event.release.prerelease }}
+        run: |
+          package_version="$(node -p "require('./package.json').version")"
+          test "$RELEASE_TAG" = "v$package_version"
+          if [[ "$package_version" == *-* ]]; then
+            test "$RELEASE_PRERELEASE" = true
+          else
+            test "$RELEASE_PRERELEASE" = false
+          fi
+      - run: npm ci --ignore-scripts
+      - run: npm run migrate:db -- --dsn "$DATABASE_URL"
+      - run: npm test
+      - run: npm run fuzz
+      - run: npm run check
+      - run: npm run secret-scan
+      - run: npm run license-check
+      - run: npm audit --omit=dev --audit-level=moderate
+      - name: Validate managed production configuration profile
+        run: |
+          TGCLOUD_ENV=production \
+          DATABASE_URL=postgres://runtime:synthetic@db.internal:5432/tgcloud?sslmode=verify-full \
+          TGCLOUD_KMS_KEY_ID=arn:aws:kms:us-east-1:111122223333:key/synthetic \
+          TGCLOUD_HMAC_KEY="$(node -e "process.stdout.write(require('node:crypto').randomBytes(32).toString('base64url'))")" \
+          TGCLOUD_HMAC_KEY_ID=release-hmac-2026 \
+          TGCLOUD_DISTRIBUTED_LIMITER=true \
+          TGCLOUD_RATE_LIMITER_MODULE=/app/config/rate-limiter-adapter.mjs \
+          node src/cli.js config-check
+      - name: Build release artifacts
+        run: |
+          node scripts/generate-sbom.mjs > sbom.cdx.json
+          npm pack --json > pack-result.json
+          package_file="$(node -e "const result=require('./pack-result.json'); process.stdout.write(result[0].filename)")"
+          sha256sum "$package_file" > "$package_file.sha256"
+          echo "PACKAGE_FILE=$package_file" >> "$GITHUB_ENV"
+      - name: Publish immutable package
+        run: |
+          package_version="$(node -p "require('./package.json').version")"
+          if npm view "tgcloud-secrets@$package_version" version >/dev/null 2>&1; then
+            echo "tgcloud-secrets@$package_version is already published"
+            published_shasum="$(npm view "tgcloud-secrets@$package_version" dist.shasum)"
+            local_shasum="$(sha1sum "$PACKAGE_FILE" | cut -d' ' -f1)"
+            test "$published_shasum" = "$local_shasum"
+            exit 0
+          fi
+          if [[ "$package_version" == *-* ]]; then
+            npm publish "$PACKAGE_FILE" --tag beta --access public
+          else
+            npm publish "$PACKAGE_FILE" --tag latest --access public
+          fi
+      - name: Attach release artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          gh release upload "$RELEASE_TAG" \
+            "$PACKAGE_FILE" \
+            "$PACKAGE_FILE.sha256" \
+            sbom.cdx.json \
+            --clobber

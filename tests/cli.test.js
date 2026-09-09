@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { mkdtemp } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -28,6 +29,13 @@ function runCli(args, input, extraEnv = {}) {
     child.stdin.end(input);
   });
 }
+
+test('CLI version matches the package version', async () => {
+  const packageVersion = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
+  const result = await runCli(['--version'], '');
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(result.stdout.trim(), packageVersion);
+});
 
 test('CLI accepts newline-terminated piped secrets', async () => {
   const dataDir = await mkdtemp(join(tmpdir(), 'tgcloud-secrets-cli-'));

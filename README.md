@@ -24,13 +24,21 @@ backups, and exercised runbooks.
 
 Requires Node.js 22 or newer.
 
+Install the beta CLI from npm:
+
 ```sh
-npm ci
+npm install --global tgcloud-secrets@beta
+tgcloud-secrets --version
+```
 
-node src/cli.js init --data-dir .tgcloud-secrets
-printf %s "$OPENAI_API_KEY" | node src/cli.js set openai --data-dir .tgcloud-secrets
+When working from a repository checkout, run `npm ci` and replace
+`tgcloud-secrets` in the commands below with `node src/cli.js`.
 
-node src/cli.js grant openai \
+```sh
+tgcloud-secrets init --data-dir .tgcloud-secrets
+printf %s "$OPENAI_API_KEY" | tgcloud-secrets set openai --data-dir .tgcloud-secrets
+
+tgcloud-secrets grant openai \
   --data-dir .tgcloud-secrets \
   --base-url https://api.openai.com \
   --path-prefix /v1/ \
@@ -38,7 +46,7 @@ node src/cli.js grant openai \
   --inject-header authorization \
   --inject-prefix 'Bearer '
 
-node src/cli.js serve --data-dir .tgcloud-secrets --host 127.0.0.1 --port 8787
+tgcloud-secrets serve --data-dir .tgcloud-secrets --host 127.0.0.1 --port 8787
 ```
 
 `grant` prints the capability once. It stores only a hash, so a lost token

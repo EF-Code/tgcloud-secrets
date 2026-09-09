@@ -11,8 +11,9 @@ import { generateMasterKey, encodeMasterKey } from './crypto.js';
 import { migrationStatus, runMigrations } from './migrations.js';
 import { assertDatabaseConfig, assertProductionConfig, readConfig } from './config.js';
 import { loadRateLimiterBackend } from './rate-limiter-adapter.js';
+import { readFileSync } from 'node:fs';
 
-const VERSION = '0.1.0';
+const VERSION = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
 
 function usage() {
   console.log(`tgcloud-secrets ${VERSION}

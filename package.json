@@ -1,6 +1,6 @@
 {
   "name": "tgcloud-secrets",
-  "version": "0.1.0",
+  "version": "0.1.0-beta.1",
   "description": "Capability-scoped secret injection for Telegram Serverless bots — store vendor secrets encrypted, grant narrow capability tokens, inject on egress",
   "type": "module",
   "bin": {
@@ -16,6 +16,7 @@
   },
   "files": [
     "LICENSE",
+    "CHANGELOG.md",
     "README.md",
     "SECURITY.md",
     "runtime/",
@@ -35,12 +36,13 @@
     "config:check": "node src/cli.js config-check",
     "sbom": "node scripts/generate-sbom.mjs",
     "secret-scan": "node scripts/secret-scan.mjs",
-    "license-check": "node scripts/check-license-policy.mjs"
+    "license-check": "node scripts/check-license-policy.mjs",
+    "prepublishOnly": "npm run check && npm run fuzz && npm run secret-scan && npm run license-check"
   },
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/EF-Code/tgcloud-secrets.git"
+    "url": "git+https://github.com/EF-Code/tgcloud-secrets.git"
   },
   "homepage": "https://github.com/EF-Code/tgcloud-secrets#readme",
   "bugs": {
