@@ -56,10 +56,6 @@
     "postgres"
   ],
   "author": "EF-Code",
-  "funding": {
-    "type": "github",
-    "url": "https://github.com/sponsors/EF-Code"
-  },
   "publishConfig": {
     "provenance": true,
     "access": "public"

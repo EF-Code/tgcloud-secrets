@@ -14,8 +14,6 @@ The repository contains the application controls and provider-neutral
 production artifacts, but it is not a claim of turnkey production readiness.
 The remaining gates that require infrastructure or organizational decisions are
 listed in [the readiness status matrix](docs/PRODUCTION_READINESS_STATUS.md).
-The two local planning prompts are intentionally not part of the package or
-release workflow.
 
 Use the file store for local development. Shared or multi-tenant operation
 requires Postgres with forced RLS, a non-owner runtime role, managed KMS,
@@ -27,7 +25,7 @@ backups, and exercised runbooks.
 Requires Node.js 22 or newer.
 
 ```sh
-npm test
+npm ci
 
 node src/cli.js init --data-dir .tgcloud-secrets
 printf %s "$OPENAI_API_KEY" | node src/cli.js set openai --data-dir .tgcloud-secrets
@@ -139,11 +137,11 @@ answers, and attempts to override the injected header. It pins the verified
 upstream address while preserving HTTPS host/SNI behavior.
 
 The optional `src/admin.js` module provides authenticated, idempotent routes
-for secret writes/deletes/rollback, capability issue/revoke/rotation,
-tenant/project emergency revocation, lifecycle transitions, and audit reads. It deliberately requires
-an external authentication adapter and does not accept a caller-supplied
-approval identity. The CLI does not invent OIDC, MFA, workload identity, or an
-admin deployment; those are integration and organizational gates.
+for secret writes, deletion, rollback, capability issuance, revocation,
+rotation, tenant and project emergency revocation, lifecycle transitions, and
+audit reads. It requires an external authentication adapter and does not accept
+a caller-supplied approval identity. OIDC, MFA, workload identity, and admin
+deployment remain integration and organizational decisions.
 
 ## Security model
 
@@ -222,6 +220,8 @@ npm pack --dry-run
 
 Postgres tests use the configured `DATABASE_URL`; if it is unset they default
 to port 5433 so an accidental local test cannot mutate an unrelated database.
+The test command does not start PostgreSQL; create and migrate a disposable test
+database first or provide an already migrated test DSN.
 
 The broker returns upstream response bytes and selected representation
 metadata. Some upstreams echo injected authentication headers or request data;
