@@ -32,7 +32,6 @@ function boundedOperation(operation, timeoutMs, message, statusCode = 503, publi
   let timer;
   const timeout = new Promise((_, reject) => {
     timer = setTimeout(() => reject(Object.assign(new Error(message), { statusCode, publicCode })), timeoutMs);
-    timer.unref?.();
   });
   return Promise.race([pending, timeout]).finally(() => clearTimeout(timer));
 }

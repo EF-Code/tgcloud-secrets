@@ -92,7 +92,6 @@ export class RedisRateLimiter {
       let timer;
       const timeout = new Promise((_, reject) => {
         timer = setTimeout(() => reject(Object.assign(new Error('Redis rate limiter timed out'), { code: 'TGCLOUD_RATE_LIMIT_TIMEOUT' })), this.operationTimeoutMs);
-        timer.unref?.();
       });
       let result;
       try {

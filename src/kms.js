@@ -153,7 +153,6 @@ export class AwsKMSProvider {
             controller.abort();
             reject(Object.assign(new Error('AWS KMS operation timed out'), { code: 'TGCLOUD_KMS_TIMEOUT' }));
           }, this.operationTimeoutMs);
-          timer.unref?.();
         }),
       ]);
     } finally {
