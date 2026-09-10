@@ -3,7 +3,10 @@
 All notable changes to this project are documented here. The project follows
 [Semantic Versioning](https://semver.org/).
 
-## Unreleased
+## 0.1.0-beta.3 - 2026-09-10
+
+Security hardening release for CLI diagnostics and machine-readable migration
+output.
 
 ### Security
 
