@@ -455,23 +455,51 @@ test('runtime helper rejects remote HTTP broker endpoints', () => {
   assert.doesNotThrow(() => createSecretFetch({ endpoint: 'http://127.0.0.1:8787', capability, fetchImpl: async () => new Response() }));
 });
 
-test('runtime helper forbids redirects and forwards caller cancellation', async () => {
+test('runtime helper uses a string URL, forbids redirects, and forwards caller cancellation', async () => {
   const capability = `tgscap_${'c'.repeat(32)}`;
   const controller = new AbortController();
   let seen;
   const secretFetch = createSecretFetch({
     endpoint: 'https://secrets.example.com',
     capability,
-    fetchImpl: async (_url, options) => {
-      seen = options;
+    fetchImpl: async (url, options) => {
+      seen = { url, options };
       return new Response('ok');
     },
   });
   const response = await secretFetch('/v1/health', { signal: controller.signal });
   assert.equal(response.status, 200);
-  assert.equal(seen.redirect, 'error');
-  assert.equal(seen.credentials, 'omit');
-  assert.equal(seen.signal, controller.signal);
+  assert.equal(seen.url, 'https://secrets.example.com/v1/fetch');
+  assert.equal(typeof seen.url, 'string');
+  assert.equal(seen.options.redirect, 'error');
+  assert.equal(Object.hasOwn(seen.options, 'credentials'), false);
+  assert.equal(seen.options.signal, controller.signal);
+});
+
+test('Telegram Serverless adapter requires and uses the injected SDK fetch subset', async () => {
+  const { createTelegramSecretFetch } = await import('../runtime/secret-fetch.js');
+  let request;
+  const sdkFetch = async (url, options) => {
+    request = { url, options };
+    return { ok: true, status: 200 };
+  };
+  const secretFetch = createTelegramSecretFetch({
+    endpoint: 'https://secrets.example.com',
+    capability: `tgscap_${'t'.repeat(32)}`,
+    fetch: sdkFetch,
+  });
+  assert.deepEqual(await secretFetch('/v1/models'), { ok: true, status: 200 });
+  assert.equal(request.url, 'https://secrets.example.com/v1/fetch');
+  assert.deepEqual(Object.keys(request.options).sort(), ['body', 'headers', 'method', 'redirect']);
+  assert.equal(request.options.method, 'POST');
+  assert.equal(request.options.redirect, 'error');
+  assert.throws(
+    () => createTelegramSecretFetch({
+      endpoint: 'https://secrets.example.com',
+      capability: `tgscap_${'t'.repeat(32)}`,
+    }),
+    /fetch export from 'sdk'/,
+  );
 });
 
 test('runtime helper bounds serialized client requests before sending them', async () => {
