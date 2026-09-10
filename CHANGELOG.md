@@ -3,7 +3,11 @@
 All notable changes to this project are documented here. The project follows
 [Semantic Versioning](https://semver.org/).
 
-## Unreleased
+## 0.1.0-beta.2 - 2026-09-10
+
+Telegram Serverless compatibility update. The adapter follows the documented
+V8 SDK architecture and has been build-tested, but still awaits execution in a
+live Telegram Serverless project.
 
 ### Added
 
