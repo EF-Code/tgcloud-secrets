@@ -91,7 +91,10 @@ export function createSecretFetch({ endpoint, capability, fetchImpl = globalThis
     if (utf8ByteLength(payload) > MAX_CLIENT_REQUEST_BYTES) {
       throw new Error(`Secret fetch request is too large; maximum is ${MAX_CLIENT_REQUEST_BYTES} bytes`);
     }
-    const brokerResponse = await fetchImpl(new URL('/v1/fetch', brokerUrl), {
+    // Telegram Serverless documents string URLs and a fetch-like options object.
+    // Keep this request inside that documented subset; in particular, do not pass
+    // browser-only credential policy fields to the isolated server runtime.
+    const fetchOptions = {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
@@ -99,11 +102,28 @@ export function createSecretFetch({ endpoint, capability, fetchImpl = globalThis
       },
       body: payload,
       redirect: 'error',
-      credentials: 'omit',
-      signal: init.signal,
-    });
+    };
+    // AbortController is not part of Telegram's documented Serverless contract.
+    // Forward a caller-provided signal for compatible fetch implementations, but
+    // do not manufacture or require one in the Serverless adapter.
+    if (init.signal !== undefined) fetchOptions.signal = init.signal;
+    const brokerResponse = await fetchImpl(new URL('/v1/fetch', brokerUrl).href, fetchOptions);
     return brokerResponse;
   };
+}
+
+/**
+ * Telegram Serverless adapter.
+ *
+ * Pass the `fetch` export injected by Telegram's `sdk` module. Keeping it
+ * explicit prevents an accidental dependency on a browser or Node global when
+ * this file is vendored into a Serverless project's `lib/` directory.
+ */
+export function createTelegramSecretFetch({ endpoint, capability, fetch: sdkFetch } = {}) {
+  if (typeof sdkFetch !== 'function') {
+    throw new Error("Telegram Serverless requires the fetch export from 'sdk'");
+  }
+  return createSecretFetch({ endpoint, capability, fetchImpl: sdkFetch });
 }
 
 export function secretFetch(config, path, init) {
