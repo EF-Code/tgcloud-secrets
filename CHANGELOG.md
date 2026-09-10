@@ -3,6 +3,21 @@
 All notable changes to this project are documented here. The project follows
 [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Added
+
+- A first-class `createTelegramSecretFetch` adapter that requires Telegram's
+  injected `sdk.fetch` explicitly.
+- A fail-closed, non-sensitive `tgcloud run` compatibility probe fixture.
+
+### Changed
+
+- The vendorable runtime helper now sends a string URL and limits its default
+  request options to Telegram Serverless's documented fetch-compatible surface.
+- Abort signals are forwarded only when callers explicitly provide one; the
+  adapter does not require undocumented cancellation globals.
+
 ## 0.1.0-beta.1 - 2026-09-09
 
 First public beta.
