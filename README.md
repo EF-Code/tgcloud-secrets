@@ -65,12 +65,12 @@ Telegram Serverless does not install packages at runtime. Vendor
 
 ```js
 import { fetch } from 'sdk';
-import { createSecretFetch } from 'lib/secret-fetch';
+import { createTelegramSecretFetch } from 'lib/secret-fetch';
 
-const openaiFetch = createSecretFetch({
+const openaiFetch = createTelegramSecretFetch({
   endpoint: 'https://secrets.example.internal',
-  capability: 'tgscap_REPLACE_WITH_REVOCABLE_CAPABILITY',
-  fetchImpl: fetch,
+  capability: 'REPLACE_WITH_REVOCABLE_CAPABILITY',
+  fetch,
 });
 
 export function createCompletion(body) {
@@ -78,10 +78,20 @@ export function createCompletion(body) {
 }
 ```
 
-The helper uses the platform `fetch`, sends the capability in
+The Telegram adapter requires the platform `fetch` explicitly, sends the capability in
 `X-Tgcloud-Capability`, strips URL fragments, rejects remote HTTP broker
 endpoints, bounds the serialized client request to 1 MiB, and returns the
-upstream `Response`.
+upstream `Response`. It uses a string URL and only the documented Serverless
+request fields. A caller-provided abort signal is forwarded when the selected
+runtime supports it, but cancellation is not required by the adapter.
+
+The npm subpath `tgcloud-secrets/telegram-serverless` exports the same
+self-contained vendorable module. Telegram does not install npm packages at
+runtime, so copy the file into `lib/` or include it in your build output.
+
+A non-sensitive compatibility handler is provided under
+`examples/telegram-serverless/`. Run it with `tgcloud run` before deploying to
+confirm the current beta runtime's globals and outbound request behavior.
 
 ## CLI reference
 
