@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtemp } from 'node:fs/promises';
+import { mkdtemp, writeFile } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -49,6 +49,37 @@ test('CLI accepts newline-terminated piped secrets', async () => {
   );
   assert.equal(maxLength.code, 0, maxLength.stderr);
   assert.match(maxLength.stdout, /"name": "max"/);
+});
+
+test('CLI init output does not disclose its private storage path', async () => {
+  const privatePath = await mkdtemp(join(tmpdir(), 'tgcloud-secrets-sensitive-path-'));
+  const result = await runCli(['init', '--data-dir', privatePath, '--json'], '');
+  assert.equal(result.code, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), { store: 'file' });
+  assert.doesNotMatch(result.stdout, new RegExp(privatePath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+});
+
+test('CLI error output redacts database credentials', async () => {
+  const credential = 'super-secret-password';
+  const dsn = `postgres://runtime:${credential}@127.0.0.1:1/unreachable`;
+  const result = await runCli([dsn], '');
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /postgres:\/\/<redacted>/);
+  assert.doesNotMatch(result.stderr, new RegExp(credential));
+  assert.doesNotMatch(result.stderr, /postgres:\/\/runtime:/);
+});
+
+test('CLI error output redacts an environment-derived storage path', async () => {
+  const privatePath = join(await mkdtemp(join(tmpdir(), 'tgcloud-secrets-private-parent-')), 'private-store');
+  await writeFile(privatePath, 'not a directory');
+  const result = await runCli(['init'], '', {
+    TGCLOUD_SECRETS_DATA_DIR: privatePath,
+    DATABASE_URL: undefined,
+    TGCLOUD_SECRETS_DSN: undefined,
+  });
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /<redacted>/);
+  assert.doesNotMatch(result.stderr, new RegExp(privatePath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
 });
 
 test('CLI DATABASE_URL vs --data-dir precedence', async () => {

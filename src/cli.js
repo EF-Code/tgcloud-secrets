@@ -11,6 +11,7 @@ import { generateMasterKey, encodeMasterKey } from './crypto.js';
 import { migrationStatus, runMigrations } from './migrations.js';
 import { assertDatabaseConfig, assertProductionConfig, readConfig } from './config.js';
 import { loadRateLimiterBackend } from './rate-limiter-adapter.js';
+import { redactText } from './observability.js';
 import { readFileSync } from 'node:fs';
 
 const VERSION = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
@@ -291,6 +292,28 @@ function printJsonOrText(options, value, text) {
   else console.log(text);
 }
 
+function redactCliError(error, env = process.env, argv = process.argv.slice(2)) {
+  let message = error instanceof Error ? error.message : 'Unexpected failure';
+  const sensitiveValues = [
+    env.DATABASE_URL,
+    env.TGCLOUD_SECRETS_DSN,
+    env.TGCLOUD_SECRETS_DATA_DIR,
+    env.XDG_DATA_HOME,
+    env.HOME,
+    env.APPDATA,
+    env.LOCALAPPDATA,
+  ];
+  for (let index = 0; index < argv.length - 1; index += 1) {
+    if (argv[index] === '--dsn' || argv[index] === '--data-dir' || argv[index] === '--from' || argv[index] === '--to') {
+      sensitiveValues.push(argv[index + 1]);
+    }
+  }
+  for (const value of sensitiveValues) {
+    if (typeof value === 'string' && value.length > 0) message = message.split(value).join('<redacted>');
+  }
+  return redactText(message);
+}
+
 async function run(argv) {
   if (argv.length === 0 || argv.includes('--help')) {
     usage();
@@ -310,8 +333,9 @@ async function run(argv) {
       assertProductionConfig(config);
       printJsonOrText(options, { ok: true, environment: config.environment, production: config.production }, 'Configuration is valid');
     } catch (error) {
-      if (options.json) console.log(JSON.stringify({ ok: false, error: error.message }, null, 2));
-      else console.error(error.message);
+      const message = redactCliError(error);
+      if (options.json) console.log(JSON.stringify({ ok: false, error: message }, null, 2));
+      else console.error(message);
       process.exitCode = 1;
     }
     return;
@@ -341,10 +365,9 @@ async function run(argv) {
   if (command === 'init') {
     await store.init();
     if (isPgStore) {
-      const maskedDsn = dsnOption(options) ? String(dsnOption(options)).replace(/:\/\/[^@]+@/, '://***@') : 'postgres://***';
-      printJsonOrText(options, { dsn: maskedDsn, orgId, projectId }, `Initialized Postgres store for org ${orgId} project ${projectId}`);
+      printJsonOrText(options, { store: 'postgres', orgId, projectId }, `Initialized Postgres store for org ${orgId} project ${projectId}`);
     } else {
-      printJsonOrText(options, { dataDir: dataDirOption(options) }, `Initialized private secret store in ${dataDirOption(options)}`);
+      printJsonOrText(options, { store: 'file' }, 'Initialized private secret store');
     }
     return;
   }
@@ -563,6 +586,7 @@ async function run(argv) {
 }
 
 run(process.argv.slice(2)).catch((error) => {
-  console.error(`error: ${error.message}`);
+  const message = redactCliError(error);
+  console.error(`error: ${message}`);
   process.exitCode = 1;
 });

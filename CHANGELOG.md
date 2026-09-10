@@ -3,6 +3,14 @@
 All notable changes to this project are documented here. The project follows
 [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Security
+
+- Removed DSN and private storage paths from CLI and pool diagnostics.
+- Redacted environment- and option-derived connection details from CLI errors.
+- Removed the unbounded DSN-redaction regular expression flagged by CodeQL.
+
 ## 0.1.0-beta.2 - 2026-09-10
 
 Telegram Serverless compatibility update. The adapter follows the documented

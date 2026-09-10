@@ -60,10 +60,6 @@ function validateCapabilityId(id) {
   return id;
 }
 
-function redactDsn(dsn) {
-  return String(dsn).replace(/:\/\/[^@]+@/, '://***@');
-}
-
 function validKmsKeyId(value) {
   return typeof value === 'string' && value.length > 0 && value.length <= 512
     && value.trim() === value && !/[\u0000-\u001f\u007f]/.test(value) && value !== 'unknown';
@@ -256,7 +252,6 @@ export class PgStore {
     validateOrgProjectId(orgId, 'orgId');
     validateOrgProjectId(projectId, 'projectId');
     this.dsn = connectionString;
-    this.dsnMasked = redactDsn(connectionString);
     this.orgId = orgId;
     this.projectId = projectId;
     this.globalProjectId = `${orgId}:${projectId}`;
@@ -286,7 +281,7 @@ export class PgStore {
     });
     const safeLogger = createRedactingLogger(console);
     this.pool.on('error', (err) => {
-      safeLogger.error('pg pool error', { errorName: err.name || 'Error', dsn: this.dsnMasked });
+      safeLogger.error('pg pool error', { errorName: err.name || 'Error' });
     });
     if (kmsProvider) {
       this.kms = kmsProvider;
