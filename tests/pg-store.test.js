@@ -36,6 +36,19 @@ test('pg-store: envelope v3 encrypts and binds to org/project', async () => {
   }
 });
 
+test('pg-store: retains only a constant redacted DSN diagnostic property', async () => {
+  const store = new PgStore({
+    dsn: 'postgres://runtime:super-secret-password@127.0.0.1:5432/tgcloud',
+    kmsProvider: new LocalKMSProvider({ masterKey: generateMasterKey(), keyId: 'local' }),
+  });
+  try {
+    assert.equal(store.dsnMasked, 'postgres://<redacted>');
+    assert.doesNotMatch(store.dsnMasked, /super-secret-password|runtime|127\.0\.0\.1/);
+  } finally {
+    await store.close();
+  }
+});
+
 test('pg-store: capability scoped and resolves with PgStore', async () => {
   const { store } = await getTestStore();
   try {

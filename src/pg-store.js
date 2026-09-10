@@ -252,6 +252,7 @@ export class PgStore {
     validateOrgProjectId(orgId, 'orgId');
     validateOrgProjectId(projectId, 'projectId');
     this.dsn = connectionString;
+    this.dsnMasked = 'postgres://<redacted>';
     this.orgId = orgId;
     this.projectId = projectId;
     this.globalProjectId = `${orgId}:${projectId}`;

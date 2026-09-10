@@ -142,16 +142,19 @@ function valueOption(options, name, fallback) {
   return options[name] === undefined ? fallback : options[name];
 }
 
-function dataDirOption(options) {
-  if (options['data-dir'] !== undefined) return options['data-dir'];
-  if (process.env.TGCLOUD_SECRETS_DATA_DIR !== undefined) {
-    if (process.env.TGCLOUD_SECRETS_DATA_DIR.length === 0) throw new Error('TGCLOUD_SECRETS_DATA_DIR must not be empty');
-    return process.env.TGCLOUD_SECRETS_DATA_DIR;
-  }
-  if (process.platform === 'win32') return join(process.env.APPDATA || process.env.LOCALAPPDATA || '.', 'tgcloud-secrets');
-  if (process.env.XDG_DATA_HOME) return join(process.env.XDG_DATA_HOME, 'tgcloud-secrets');
-  if (process.env.HOME) return join(process.env.HOME, '.local', 'share', 'tgcloud-secrets');
+function defaultDataDir(env = process.env) {
+  if (env.TGCLOUD_SECRETS_DATA_DIR !== undefined) return env.TGCLOUD_SECRETS_DATA_DIR;
+  if (process.platform === 'win32') return join(env.APPDATA || env.LOCALAPPDATA || '.', 'tgcloud-secrets');
+  if (env.XDG_DATA_HOME) return join(env.XDG_DATA_HOME, 'tgcloud-secrets');
+  if (env.HOME) return join(env.HOME, '.local', 'share', 'tgcloud-secrets');
   return '.tgcloud-secrets';
+}
+
+function dataDirOption(options, env = process.env) {
+  if (options['data-dir'] !== undefined) return options['data-dir'];
+  const dataDir = defaultDataDir(env);
+  if (dataDir.length === 0) throw new Error('TGCLOUD_SECRETS_DATA_DIR must not be empty');
+  return dataDir;
 }
 
 function dsnOption(options) {
@@ -302,10 +305,18 @@ function redactCliError(error, env = process.env, argv = process.argv.slice(2)) 
     env.HOME,
     env.APPDATA,
     env.LOCALAPPDATA,
+    env.TGCLOUD_RATE_LIMITER_MODULE,
+    defaultDataDir(env),
   ];
-  for (let index = 0; index < argv.length - 1; index += 1) {
-    if (argv[index] === '--dsn' || argv[index] === '--data-dir' || argv[index] === '--from' || argv[index] === '--to') {
+  const sensitiveOptions = new Set(['--dsn', '--data-dir', '--from', '--to', '--rate-limiter-module', '--kms-key-id']);
+  for (let index = 0; index < argv.length; index += 1) {
+    const equals = argv[index].indexOf('=');
+    const option = equals === -1 ? argv[index] : argv[index].slice(0, equals);
+    if (!sensitiveOptions.has(option)) continue;
+    if (equals !== -1) sensitiveValues.push(argv[index].slice(equals + 1));
+    else if (index + 1 < argv.length) {
       sensitiveValues.push(argv[index + 1]);
+      index += 1;
     }
   }
   for (const value of sensitiveValues) {
@@ -365,9 +376,9 @@ async function run(argv) {
   if (command === 'init') {
     await store.init();
     if (isPgStore) {
-      printJsonOrText(options, { store: 'postgres', orgId, projectId }, `Initialized Postgres store for org ${orgId} project ${projectId}`);
+      printJsonOrText(options, { dsn: '<redacted>', orgId, projectId }, `Initialized Postgres store for org ${orgId} project ${projectId}`);
     } else {
-      printJsonOrText(options, { store: 'file' }, 'Initialized private secret store');
+      printJsonOrText(options, { dataDir: '<redacted>' }, 'Initialized private secret store');
     }
     return;
   }
@@ -505,25 +516,25 @@ async function run(argv) {
       let skipped = 0;
       for (const { name } of secrets) {
         if (existing.has(name)) {
-          console.log(`Skipped existing secret ${name} (already in Postgres)`);
+          if (!options.json) console.log(`Skipped existing secret ${name} (already in Postgres)`);
           skipped++;
           continue;
         }
         if (isDryRun) {
-          console.log(`[dry-run] Would migrate secret ${name}`);
+          if (!options.json) console.log(`[dry-run] Would migrate secret ${name}`);
           migrated++;
           continue;
         }
         const value = await fileStore.getSecret(name);
         await pgStore.setSecret(name, value, { orgId, projectId });
-        console.log(`Migrated secret ${name}`);
+        if (!options.json) console.log(`Migrated secret ${name}`);
         migrated++;
       }
       const caps = sourceSnapshot
         ? Object.values(sourceSnapshot.capabilities)
         : await fileStore.listCapabilities();
-      console.log(`Note: capabilities must be re-granted after migration (tokens are hashed, cannot be migrated). Found ${caps.length} capabilities in file store.`);
-      if (isDryRun) console.log(`[dry-run] Would migrate ${migrated} secrets, skipped ${skipped}`);
+      if (!options.json) console.log(`Note: capabilities must be re-granted after migration (tokens are hashed, cannot be migrated). Found ${caps.length} capabilities in file store.`);
+      if (isDryRun && !options.json) console.log(`[dry-run] Would migrate ${migrated} secrets, skipped ${skipped}`);
       printJsonOrText(options, { migratedSecrets: migrated, skipped, capabilitiesFound: caps.length, dryRun: isDryRun }, `${isDryRun ? '[dry-run] ' : ''}Migrated ${migrated} secrets to Postgres (skipped ${skipped})`);
     } finally {
       await pgStore.close().catch(() => {});

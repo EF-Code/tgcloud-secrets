@@ -7,9 +7,12 @@ All notable changes to this project are documented here. The project follows
 
 ### Security
 
-- Removed DSN and private storage paths from CLI and pool diagnostics.
+- Replaced DSNs and private storage paths in CLI and pool diagnostics with
+  stable redacted placeholders while preserving existing JSON field names.
 - Redacted environment- and option-derived connection details from CLI errors.
 - Removed the unbounded DSN-redaction regular expression flagged by CodeQL.
+- Ensured migration JSON mode emits one valid JSON document without progress
+  text.
 
 ## 0.1.0-beta.2 - 2026-09-10
 

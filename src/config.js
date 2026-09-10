@@ -48,7 +48,7 @@ function flag(value, fallback = false) {
   if (value === undefined) return fallback;
   if (value === true || value === '1' || value === 'true') return true;
   if (value === false || value === '0' || value === 'false') return false;
-  throw new Error(`Invalid boolean configuration value: ${value}`);
+  throw new Error('Boolean configuration values must be true, false, 1, or 0');
 }
 
 function dsnHost(dsn) {

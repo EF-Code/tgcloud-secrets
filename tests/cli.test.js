@@ -55,8 +55,50 @@ test('CLI init output does not disclose its private storage path', async () => {
   const privatePath = await mkdtemp(join(tmpdir(), 'tgcloud-secrets-sensitive-path-'));
   const result = await runCli(['init', '--data-dir', privatePath, '--json'], '');
   assert.equal(result.code, 0, result.stderr);
-  assert.deepEqual(JSON.parse(result.stdout), { store: 'file' });
+  assert.deepEqual(JSON.parse(result.stdout), { dataDir: '<redacted>' });
   assert.doesNotMatch(result.stdout, new RegExp(privatePath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+});
+
+test('CLI error output redacts equals-form and canonicalized storage paths', async () => {
+  const parent = await mkdtemp(join(tmpdir(), 'tgcloud-secrets-canonical-parent-'));
+  const directPath = join(parent, 'direct-store');
+  await writeFile(directPath, 'not a directory');
+  const direct = await runCli(['init', `--data-dir=${directPath}`], '', {
+    DATABASE_URL: undefined,
+    TGCLOUD_SECRETS_DSN: undefined,
+  });
+  assert.equal(direct.code, 1);
+  assert.match(direct.stderr, /<redacted>/);
+  assert.doesNotMatch(direct.stderr, new RegExp(directPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+
+  const canonicalPath = join(parent, 'tgcloud-secrets');
+  await writeFile(canonicalPath, 'not a directory');
+  const canonical = await runCli(['init'], '', {
+    DATABASE_URL: undefined,
+    TGCLOUD_SECRETS_DSN: undefined,
+    TGCLOUD_SECRETS_DATA_DIR: undefined,
+    XDG_DATA_HOME: join(parent, 'unused', '..'),
+  });
+  assert.equal(canonical.code, 1);
+  assert.match(canonical.stderr, /<redacted>/);
+  assert.doesNotMatch(canonical.stderr, new RegExp(canonicalPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+});
+
+test('CLI redacts rate-limiter module paths and invalid environment values', async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'tgcloud-secrets-limiter-store-'));
+  const modulePath = '/tmp/private-limiter-adapter-secret.mjs';
+  const limiter = await runCli(['serve', '--data-dir', dataDir, `--rate-limiter-module=${modulePath}`], '');
+  assert.equal(limiter.code, 1);
+  assert.match(limiter.stderr, /<redacted>/);
+  assert.doesNotMatch(limiter.stderr, new RegExp(modulePath));
+
+  const invalid = await runCli(['config-check', '--json'], '', { TGCLOUD_ALLOW_HTTP: 'super-secret' });
+  assert.equal(invalid.code, 1);
+  assert.doesNotMatch(invalid.stdout, /super-secret/);
+  assert.deepEqual(JSON.parse(invalid.stdout), {
+    ok: false,
+    error: 'Boolean configuration values must be true, false, 1, or 0',
+  });
 });
 
 test('CLI error output redacts database credentials', async () => {
@@ -121,8 +163,9 @@ test('CLI migrate --dry-run does not initialize tenant rows', async () => {
   const suffix = `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
   const orgId = `dryorg_${suffix}`;
   const projectId = `dryproj_${suffix}`;
-  const result = await runCli(['migrate', '--from', dataDir, '--to', testDsn, '--org', orgId, '--project', projectId, '--dry-run']);
+  const result = await runCli(['migrate', '--from', dataDir, '--to', testDsn, '--org', orgId, '--project', projectId, '--dry-run', '--json']);
   assert.equal(result.code, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), { migratedSecrets: 1, skipped: 0, capabilitiesFound: 0, dryRun: true });
   const pool = new Pool({ connectionString: testDsn, ssl: false });
   try {
     const rows = await pool.query('SELECT 1 FROM orgs WHERE id=$1', [orgId]);
