@@ -1,4 +1,4 @@
-import { api, fetch } from 'sdk';
+import { fetch } from 'sdk';
 import { createTelegramSecretFetch } from '../lib/secret-fetch.js';
 
 // Replace these two non-secret placeholders only in a private test project.
@@ -30,9 +30,6 @@ export default async function (message) {
     brokerStatus: response.status,
     brokerOk: response.ok,
   };
-  await api.sendMessage({
-    chat_id: message.chat.id,
-    text: `tgcloud-secrets probe: ${JSON.stringify(result)}`,
-  });
+  // Return through the CLI instead of sending a message to a synthetic chat ID.
   return result;
 }

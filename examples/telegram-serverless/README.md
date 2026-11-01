@@ -13,12 +13,13 @@ V8 runtime without exposing a vendor credential.
 
    ```sh
    npx tgcloud run handlers/message \
-     '{chat:{id:1},from:{id:1},text:"/tgcloud_secrets_probe"}' \
+     '{text:"/tgcloud_secrets_probe"}' \
      --ctx '{update:{update_id:1}}'
    ```
 
 The run must show a string-based HTTPS request at the broker, a successful
-status, and the available runtime globals. Never use a production capability,
+status, and the available runtime globals. The probe returns its result to the
+CLI without sending a Telegram message. Never use a production capability,
 Bot API token, vendor credential, or customer data in this probe.
 
 Redirect handling and invocation cancellation require separate endpoints and
