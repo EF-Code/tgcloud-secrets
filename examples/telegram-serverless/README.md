@@ -22,5 +22,20 @@ status, and the available runtime globals. The probe returns its result to the
 CLI without sending a Telegram message. Never use a production capability,
 Bot API token, vendor credential, or customer data in this probe.
 
+## Live validation
+
+On 2026-11-01 the unreleased adapter was executed with Telegram's SDK fetch
+against a synthetic broker through a temporary HTTPS tunnel. Secret injection,
+JSON forwarding, and removal of the capability header before reaching the
+upstream passed with HTTP 200. Disallowed paths, disallowed methods, and
+attempted injected-header overrides returned HTTP 400. After revocation, the
+same disposable capability returned HTTP 401 from Telegram.
+
+The runtime exposed `TextEncoder` and `Uint8Array`, but no global `URL`,
+`Headers`, `AbortController`, or `fetch`. This revealed the beta.3 adapter's
+`URL is not defined` failure. The current adapter handles this environment
+with a strict ASCII-origin fallback, and its regression test removes the same
+globals before importing the vendorable module.
+
 Redirect handling and invocation cancellation require separate endpoints and
 must not be claimed compatible until their observed results are recorded.
