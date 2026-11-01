@@ -3,9 +3,10 @@
 This fixture verifies `tgcloud-secrets` against the real Telegram Serverless
 V8 runtime without exposing a vendor credential.
 
-1. Copy `runtime/secret-fetch.js` to `lib/secret-fetch.js` in a private
+1. Copy `runtime/secret-fetch.js` to `tgcloud/lib/secret-fetch.js` in a private
    Serverless test project.
-2. Copy `handlers/message.js` to that project's `handlers/message.js`.
+2. Copy `handlers/message.js` to that project's `tgcloud/handlers/message.js`.
+   Use a separate test project if the bot already has a message handler.
 3. Replace the endpoint and capability placeholders. Use a disposable
    capability restricted to `POST /probe` on a synthetic test upstream.
 4. Execute the local sources on Telegram without deploying them:

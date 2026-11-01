@@ -61,11 +61,12 @@ control.
 ## Use from a Serverless module
 
 Telegram Serverless does not install packages at runtime. Vendor
-`runtime/secret-fetch.js` into the bot's `lib/` directory:
+`runtime/secret-fetch.js` into the bot's `tgcloud/lib/` directory. From a
+handler in `tgcloud/handlers/`, import it by relative path:
 
 ```js
 import { fetch } from 'sdk';
-import { createTelegramSecretFetch } from 'lib/secret-fetch';
+import { createTelegramSecretFetch } from '../lib/secret-fetch.js';
 
 const openaiFetch = createTelegramSecretFetch({
   endpoint: 'https://secrets.example.internal',
@@ -87,7 +88,7 @@ runtime supports it, but cancellation is not required by the adapter.
 
 The npm subpath `tgcloud-secrets/telegram-serverless` exports the same
 self-contained vendorable module. Telegram does not install npm packages at
-runtime, so copy the file into `lib/` or include it in your build output.
+runtime, so copy the file into `tgcloud/lib/` or include it in your build output.
 
 A non-sensitive compatibility handler is provided under
 `examples/telegram-serverless/`. Run it with `tgcloud run` before deploying to

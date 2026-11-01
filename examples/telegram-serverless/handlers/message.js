@@ -1,5 +1,5 @@
 import { api, fetch } from 'sdk';
-import { createTelegramSecretFetch } from 'lib/secret-fetch';
+import { createTelegramSecretFetch } from '../lib/secret-fetch.js';
 
 // Replace these two non-secret placeholders only in a private test project.
 // The capability must be disposable and limited to the broker's probe route.
