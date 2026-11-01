@@ -3,7 +3,10 @@
 All notable changes to this project are documented here. The project follows
 [Semantic Versioning](https://semver.org/).
 
-## Unreleased
+## 0.1.0-beta.4 - 2026-11-01
+
+Telegram Serverless compatibility fix, verified against the hosted runtime
+with a synthetic HTTPS broker and disposable capabilities.
 
 ### Fixed
 

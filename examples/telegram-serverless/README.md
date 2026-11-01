@@ -24,7 +24,7 @@ Bot API token, vendor credential, or customer data in this probe.
 
 ## Live validation
 
-On 2026-11-01 the unreleased adapter was executed with Telegram's SDK fetch
+On 2026-11-01 the beta.4 adapter was executed with Telegram's SDK fetch
 against a synthetic broker through a temporary HTTPS tunnel. Secret injection,
 JSON forwarding, and removal of the capability header before reaching the
 upstream passed with HTTP 200. Disallowed paths, disallowed methods, and
