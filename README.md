@@ -86,6 +86,12 @@ upstream `Response`. It uses a string URL and only the documented Serverless
 request fields. A caller-provided abort signal is forwarded when the selected
 runtime supports it, but cancellation is not required by the adapter.
 
+The adapter works without global `URL`, `Headers`, `AbortController`, or
+`fetch`. When native `URL` is unavailable, broker endpoints must use an ASCII
+DNS name (punycode for internationalized names), canonical dotted-decimal
+IPv4, or hexadecimal IPv6 in brackets. Credentials, paths, queries,
+fragments, and remote HTTP remain rejected.
+
 The npm subpath `tgcloud-secrets/telegram-serverless` exports the same
 self-contained vendorable module. Telegram does not install npm packages at
 runtime, so copy the file into `tgcloud/lib/` or include it in your build output.
