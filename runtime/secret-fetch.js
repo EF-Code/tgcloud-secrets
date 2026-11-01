@@ -11,7 +11,7 @@ function isLoopbackHost(hostname) {
   let ip = normalized;
   if (ip.includes('.')) {
     try {
-      const urlHost = new URL(`http://${ip}`).hostname;
+      const urlHost = typeof URL === 'function' ? new URL(`http://${ip}`).hostname : ip;
       if (/^\d+\.\d+\.\d+\.\d+$/.test(urlHost)) ip = urlHost;
     } catch {}
   }
@@ -19,6 +19,49 @@ function isLoopbackHost(hostname) {
   return octets.length === 4
     && octets[0] === 127
     && octets.every((octet) => Number.isInteger(octet) && octet >= 0 && octet <= 255);
+}
+
+// Telegram's V8 runtime does not expose URL. Accept a deliberately strict
+// ASCII-origin subset there instead of installing a global URL polyfill or
+// letting the transport reinterpret credentials, paths, or encoded hosts.
+function parseBrokerUrl(endpoint) {
+  if (typeof URL === 'function') return new URL(endpoint);
+  if (endpoint.length > 4_096) throw new Error('Broker endpoint is too long');
+  const match = /^(https?):\/\/(\[[0-9a-f:]+\]|[a-z0-9.-]+)(?::([0-9]{1,5}))?\/?$/i.exec(endpoint);
+  if (!match) throw new Error('Broker endpoint must be an ASCII HTTP or HTTPS origin without credentials, path, query, or fragment');
+  const protocol = `${match[1].toLowerCase()}:`;
+  const hostname = match[2].toLowerCase();
+  if (hostname.startsWith('[')) {
+    const address = hostname.slice(1, -1);
+    const halves = address.split('::');
+    const groups = halves.flatMap((half) => half ? half.split(':') : []);
+    if (halves.length > 2 || groups.some((group) => !/^[0-9a-f]{1,4}$/.test(group))
+      || (halves.length === 1 ? groups.length !== 8 : groups.length >= 8)) {
+      throw new Error('Broker endpoint contains an invalid IPv6 address');
+    }
+  } else {
+    const host = hostname.replace(/\.$/, '');
+    const labels = host.split('.');
+    if (host.length > 253 || labels.some((label) => !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label))) {
+      throw new Error('Broker endpoint contains an invalid hostname');
+    }
+    // WHATWG fetch treats numeric-ending hosts as IPv4. Permit only canonical
+    // dotted decimal so alternate/octal forms cannot alter the HTTP boundary.
+    if (/^(?:[0-9]+|0x[0-9a-f]*)$/.test(labels[labels.length - 1])) {
+      if (labels.length !== 4 || labels.some((label) => !/^(?:0|[1-9][0-9]{0,2})$/.test(label) || Number(label) > 255)) {
+        throw new Error('Broker endpoint must use a canonical IPv4 address');
+      }
+    }
+  }
+  const port = match[3] === undefined ? '' : String(Number(match[3]));
+  if (port && Number(port) > 65_535) throw new Error('Broker endpoint contains an invalid port');
+  const defaultPort = protocol === 'https:' ? '443' : '80';
+  return {
+    protocol,
+    hostname,
+    origin: `${protocol}//${hostname}${port && port !== defaultPort ? `:${port}` : ''}`,
+    pathname: '/', username: '', password: '', search: '', hash: '',
+  };
 }
 
 const HEADER_NAME = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]{1,256}$/;
@@ -34,7 +77,7 @@ export function createSecretFetch({ endpoint, capability, fetchImpl = globalThis
   if (typeof capability !== 'string' || !/^tgscap_[A-Za-z0-9_-]{16,256}$/.test(capability)) throw new Error('A valid capability is required');
   if (typeof fetchImpl !== 'function') throw new Error('A fetch implementation is required');
 
-  const brokerUrl = new URL(endpoint);
+  const brokerUrl = parseBrokerUrl(endpoint);
   if (brokerUrl.protocol !== 'https:' && brokerUrl.protocol !== 'http:') throw new Error('Broker endpoint must use HTTP or HTTPS');
   if (brokerUrl.username || brokerUrl.password || brokerUrl.pathname !== '/' || brokerUrl.search || brokerUrl.hash) throw new Error('Broker endpoint must be an origin without credentials, path, query, or fragment');
   if (brokerUrl.protocol === 'http:' && !isLoopbackHost(brokerUrl.hostname)) {
@@ -107,7 +150,7 @@ export function createSecretFetch({ endpoint, capability, fetchImpl = globalThis
     // Forward a caller-provided signal for compatible fetch implementations, but
     // do not manufacture or require one in the Serverless adapter.
     if (init.signal !== undefined) fetchOptions.signal = init.signal;
-    const brokerResponse = await fetchImpl(new URL('/v1/fetch', brokerUrl).href, fetchOptions);
+    const brokerResponse = await fetchImpl(`${brokerUrl.origin}/v1/fetch`, fetchOptions);
     return brokerResponse;
   };
 }
