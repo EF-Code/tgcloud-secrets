@@ -3,6 +3,19 @@
 All notable changes to this project are documented here. The project follows
 [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Fixed
+
+- Removed the Telegram adapter's dependency on a global `URL` constructor,
+  which is absent from the live Telegram Serverless runtime. A strict ASCII
+  origin parser preserves credential, path, query, fragment, and remote-HTTP
+  rejection when native URL parsing is unavailable.
+- Added regression coverage with `URL`, `Headers`, `AbortController`, and global
+  `fetch` removed, matching the observed platform environment.
+- Made the graceful-drain regression test wait for an active upstream request
+  explicitly, removing its timing-dependent sleep assertion.
+
 ## 0.1.0-beta.3 - 2026-09-10
 
 Security hardening release for CLI diagnostics and machine-readable migration
